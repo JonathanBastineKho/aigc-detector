@@ -22,9 +22,9 @@ import joblib
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-from aigcd import data, transforms as T          # noqa: E402
-from aigcd.features import align_bias, load_backbone, pick_device  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent))
+from src.utils import dataset as data, transforms as T          # noqa: E402
+from src.utils.features import align_bias, load_backbone, pick_device  # noqa: E402
 
 # Progressive laundering: each stage adds an op, mirroring an image being
 # reposted, screenshotted and re-encoded on its way across platforms.

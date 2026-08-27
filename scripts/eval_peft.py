@@ -17,11 +17,11 @@ import wandb
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import data, transforms as T                        # noqa: E402
-from aigcd.features import align_bias, pick_device             # noqa: E402
-from aigcd.models.heads import Detector                        # noqa: E402
-from aigcd.models.peft import apply_peft, count_params         # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import dataset as data, transforms as T                        # noqa: E402
+from src.utils.features import align_bias, pick_device             # noqa: E402
+from src.models.detector import Detector                        # noqa: E402
+from src.components.peft import apply_peft, count_params         # noqa: E402
 
 ADM_ZIP = "wildfake/Images/Diffusion_based/ADM.zip"
 REAL_ZIP = "wildfake/Images/Real/imagenet.zip"

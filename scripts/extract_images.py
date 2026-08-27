@@ -21,9 +21,9 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import data                       # noqa: E402
-from aigcd.features import align_bias        # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import dataset as data                       # noqa: E402
+from src.utils.features import align_bias        # noqa: E402
 
 
 def main() -> None:

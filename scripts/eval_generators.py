@@ -21,9 +21,9 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import data, features as F                      # noqa: E402
-from aigcd.probe import fit                                # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import dataset as data, features as F                      # noqa: E402
+from src.utils.probe import fit                                # noqa: E402
 
 GENERATORS = {
     "DDIM": "wildfake/Images/Diffusion_based/DDIM.zip",

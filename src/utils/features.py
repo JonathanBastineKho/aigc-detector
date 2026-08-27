@@ -23,7 +23,7 @@ from io import BytesIO
 
 from PIL import Image
 
-from . import data, transforms as T
+from . import dataset as data, transforms as T
 
 # timm mirror rather than facebook/* -- same weights, no license gate.
 DEFAULT_BACKBONE = "vit_large_patch16_dinov3.lvd1689m"

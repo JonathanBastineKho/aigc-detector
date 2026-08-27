@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import transforms as T  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import transforms as T  # noqa: E402
 
 
 @pytest.fixture

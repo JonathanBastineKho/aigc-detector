@@ -14,8 +14,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import data  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import dataset as data  # noqa: E402
 
 
 def test_assert_no_heldout_rejects_contaminated_frames():

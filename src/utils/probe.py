@@ -23,7 +23,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from . import data, transforms as T
+from . import dataset as data, transforms as T
 from .features import DEFAULT_BACKBONE, cache_path
 
 
@@ -80,7 +80,7 @@ def main() -> None:
     root = data.data_root()
     train = load_cell(root, args.backbone, "train", "clean", args.variant)
     if train is None:
-        raise SystemExit("No cached train features. Run: python -m aigcd.features")
+        raise SystemExit("No cached train features. Run: python -m src.utils.features")
 
     Xtr, ytr, _ = train
     clf = fit(Xtr, ytr, args.C)
@@ -96,7 +96,7 @@ def main() -> None:
     missing = [c for c in T.BATTERY if c not in set(df.cell)]
     if missing:
         print(f"\n{len(missing)} battery cells not yet cached: {', '.join(missing)}")
-        print("  python -m aigcd.features --splits val --cells all")
+        print("  python -m src.utils.features --splits val --cells all")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

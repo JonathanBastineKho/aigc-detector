@@ -16,9 +16,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from aigcd import data, transforms as T          # noqa: E402
-from aigcd.probe import load_cell                 # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.utils import dataset as data, transforms as T          # noqa: E402
+from src.utils.probe import load_cell                 # noqa: E402
 
 BB = "vit_large_patch16_dinov3.lvd1689m"
 SHOW = ["clean", "jpeg_70", "jpeg_30", "noise_0.10"]

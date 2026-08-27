@@ -24,8 +24,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-from aigcd import data, features as F  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent))
+from src.utils import dataset as data, features as F  # noqa: E402
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -91,7 +91,7 @@ def main() -> None:
 
     model_path = args.model or (data.data_root() / "cache" / "probe.joblib")
     if not model_path.exists():
-        raise SystemExit(f"no fitted probe at {model_path}. Run: python -m aigcd.probe")
+        raise SystemExit(f"no fitted probe at {model_path}. Run: python -m src.utils.probe")
 
     paths = find_images(args.input_dir)
     if not paths:

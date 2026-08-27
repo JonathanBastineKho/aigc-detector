@@ -20,7 +20,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+import torch
 from PIL import Image
+from torch.utils.data import Dataset
+
+from . import transforms
 
 # SID_Set ships three classes (SIDA paper): authentic, fully synthetic, and
 # tampered -- a real photograph with an AI-edited region.
@@ -319,4 +323,41 @@ def assert_no_heldout(df: pd.DataFrame) -> None:
         raise AssertionError(
             f"{len(leaked)} held-out rows reached a training path. "
             "TikTok's brief forbids training on this data."
+        )
+
+
+class LaunderedPairs(Dataset):
+    """Yields (clean, laundered, y, severity). The chain is resampled every
+    epoch, so laundered views are deliberately not cacheable."""
+
+    def __init__(self, df, preprocess, epoch: int = 0, max_epochs: int = 10,
+                 root: Path | None = None, jpeg_q: int = 96, crop: int = 224,
+                 pre_extracted: bool = False):
+        self.rows = df.reset_index(drop=True)
+        self.preprocess, self.epoch, self.max_epochs = preprocess, epoch, max_epochs
+        self.root, self.jpeg_q, self.crop = root or data.data_root(), jpeg_q, crop
+        self.pre_extracted = pre_extracted
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, i: int):
+        row = self.rows.iloc[i]
+        img = load_image(row.path, self.root)
+        # Pre-extracted files are already cropped and recompressed. Aligning
+        # again would add a second JPEG pass to every training sample -- an
+        # artifact present in training but not at inference, and painful to find.
+        if not self.pre_extracted:
+            from .features import align_bias  # local: avoids a cycle
+            img = align_bias(img, self.jpeg_q, self.crop)
+
+        rng = np.random.default_rng((self.epoch << 32) ^ i)
+        chain = transforms.sample_chain(self.epoch, rng, self.max_epochs)
+        laundered, log = transforms.apply_chain(img, chain)
+
+        return (
+            self.preprocess(img),
+            self.preprocess(laundered),
+            torch.tensor(float(row.y)),
+            torch.from_numpy(transforms.severity_vector(log)),
         )
