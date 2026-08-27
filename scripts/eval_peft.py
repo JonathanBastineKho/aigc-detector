@@ -109,13 +109,20 @@ def main():
 
     # 2. unseen generator. ADM only -- DDIM and DDPM are near-siblings, so
     #    holding one out while training on the other is not a real test.
-    fakes = data.scan_wildfake_zip(ADM_ZIP, "ADM", data.SID_SYNTHETIC, root,
-                                   limit=args.n_unseen)
-    reals = data.scan_wildfake_zip(REAL_ZIP, "imagenet", data.SID_REAL, root,
-                                   limit=args.n_unseen)
-    unseen = pd.concat([reals, fakes], ignore_index=True)
-    pu, yu = score(model, unseen, preprocess, "clean", root, device,
-                   args.batch_size, args.workers)   # zip images are never pre-extracted
+    #    Skipped rather than fatal if the archives are absent: the grid above
+    #    costs minutes and must not be thrown away over a missing file.
+    have_unseen = (root / ADM_ZIP).exists() and (root / REAL_ZIP).exists()
+    if have_unseen:
+        fakes = data.scan_wildfake_zip(ADM_ZIP, "ADM", data.SID_SYNTHETIC, root,
+                                       limit=args.n_unseen)
+        reals = data.scan_wildfake_zip(REAL_ZIP, "imagenet", data.SID_REAL, root,
+                                       limit=args.n_unseen)
+        unseen = pd.concat([reals, fakes], ignore_index=True)
+        pu, yu = score(model, unseen, preprocess, "clean", root, device,
+                       args.batch_size, args.workers)  # zip images never pre-extracted
+    else:
+        print(f"\n  skipping unseen-generator eval: {ADM_ZIP} or {REAL_ZIP} not found")
+        pu = yu = None
 
     total, trainable = count_params(model)
     summary = {
@@ -123,8 +130,9 @@ def main():
         "laundered_auc_mean": float(laundered.auc.mean()),
         "laundered_auc_worst": float(laundered.auc.min()),
         "robustness_gap": clean - float(laundered.auc.mean()),
-        "unseen_adm_auc": roc_auc_score(yu, pu),
-        "unseen_adm_miss_rate": float((pu[yu == 1] <= .5).mean()),
+        **({"unseen_adm_auc": roc_auc_score(yu, pu),
+            "unseen_adm_miss_rate": float((pu[yu == 1] <= .5).mean())}
+           if have_unseen else {}),
         "n_params": total, "n_trainable": trainable,
         "gpu_hours": ckpt.get("gpu_hours", float("nan")),
     }

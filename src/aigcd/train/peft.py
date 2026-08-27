@@ -113,6 +113,8 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, help="stop early, for smoke tests")
     ap.add_argument("--manifest", type=Path,
                     help="pre-extracted manifest CSV (much faster than parquet)")
+    ap.add_argument("--holdout", nargs="+",
+                    help="generators to EXCLUDE from training (leave-one-generator-out)")
     ap.add_argument("--project", default="aigc-detector")
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--out", default="checkpoints")
@@ -128,6 +130,10 @@ def main() -> None:
         mf = data.build_manifest(root)
         pre_extracted = False
     train_df = mf[mf.split == data.SPLIT_TRAIN]
+    if args.holdout:
+        before = len(train_df)
+        train_df = train_df[~train_df.generator.isin(args.holdout)]
+        print(f"holding out {args.holdout}: {before} -> {len(train_df)} training rows")
     data.assert_no_heldout(train_df)
     if args.limit:
         train_df = train_df.head(args.limit)
@@ -144,6 +150,8 @@ def main() -> None:
     )
 
     run_name = f"{args.arm}_r{args.rank}_{args.conditioner}"
+    if args.holdout:
+        run_name += "_no" + "-".join(args.holdout)
     run = None if args.no_wandb else wandb.init(
         project=args.project, name=run_name,
         config={**{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},

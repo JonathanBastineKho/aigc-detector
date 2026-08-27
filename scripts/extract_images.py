@@ -33,11 +33,18 @@ def main() -> None:
     ap.add_argument("--jpeg-q", type=int, default=96)
     ap.add_argument("--out-dir", default="extracted")
     ap.add_argument("--limit", type=int, help="rows per split, for smoke tests")
+    ap.add_argument("--wildfake", action="store_true",
+                    help="include the WildFake generator pool (DDIM/DDPM/ADM + reals)")
+    ap.add_argument("--generators", nargs="+",
+                    help="which WildFake generators (default: all available)")
+    ap.add_argument("--per-generator", type=int, default=4000)
     args = ap.parse_args()
 
     root = data.data_root()
     out_root = root / args.out_dir
-    manifest = data.build_manifest(root)
+    manifest = data.build_manifest(root, args.wildfake, args.generators,
+                                   args.per_generator)
+    print(manifest.groupby(["source", "generator"], dropna=False).size().to_string(), "\n")
 
     rows = []
     for split in args.splits:

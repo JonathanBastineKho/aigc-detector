@@ -17,6 +17,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from PIL import Image
@@ -89,6 +90,22 @@ def _scan_sid_set(root: Path, val_frac: float = 0.15, seed: int = 0) -> pd.DataF
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
+# WildFake generator pool available for TRAINING.
+WILDFAKE_GENERATORS = {
+    "DDIM": "wildfake/Images/Diffusion_based/DDIM.zip",
+    "DDPM": "wildfake/Images/Diffusion_based/DDPM.zip",
+    "ADM":  "wildfake/Images/Diffusion_based/ADM.zip",
+}
+WILDFAKE_REAL = {
+    "imagenet": "wildfake/Images/Real/imagenet.zip",
+    "ffhq":     "wildfake/Images/Real/ffhq.zip",
+}
+
+# TikTok forbids training on COCO val2017 and DALL-E Advanced. Both live inside
+# these archives alongside permitted images, so the whole archive is refused as
+# a training source rather than trusting a filter to catch every path.
+FORBIDDEN_ARCHIVES = ("coco.zip", "DALLE.zip")
+
 
 def scan_wildfake_zip(
     zip_rel: str,
@@ -130,10 +147,68 @@ def scan_wildfake_zip(
     })
 
 
-def build_manifest(root: Path | None = None) -> pd.DataFrame:
+def scan_wildfake_pool(
+    root: Path,
+    generators: list[str] | None = None,
+    per_generator: int = 4000,
+    val_frac: float = 0.15,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Build TRAIN rows from WildFake generators, balanced with WildFake reals.
+
+    Reals come from WildFake too. Pairing WildFake fakes against SID_Set reals
+    would let the model separate on photo provenance instead of generation --
+    the same class of shortcut the bias control exists to remove.
+
+    Missing archives are skipped, so a partial transfer still yields a usable
+    pool rather than an error.
+    """
+    generators = generators or list(WILDFAKE_GENERATORS)
+    frames, n_fake = [], 0
+
+    for gen in generators:
+        rel = WILDFAKE_GENERATORS.get(gen)
+        if rel is None:
+            raise ValueError(f"unknown generator {gen!r}; known: {list(WILDFAKE_GENERATORS)}")
+        if any(bad in rel for bad in FORBIDDEN_ARCHIVES):
+            raise ValueError(f"{rel} contains held-out data and may not be used for training")
+        if not (root / rel).exists():
+            print(f"  skipping {gen}: {rel} not found")
+            continue
+        df = scan_wildfake_zip(rel, gen, SID_SYNTHETIC, root, per_generator, SPLIT_TRAIN)
+        frames.append(df)
+        n_fake += len(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    # Match the real count to the fake count so the pool stays balanced.
+    for name, rel in WILDFAKE_REAL.items():
+        if not (root / rel).exists():
+            continue
+        frames.append(scan_wildfake_zip(rel, name, SID_REAL, root, n_fake, SPLIT_TRAIN))
+        break
+
+    pool = pd.concat(frames, ignore_index=True)
+    rng = np.random.default_rng(seed)
+    val_idx = rng.choice(pool.index, size=int(len(pool) * val_frac), replace=False)
+    pool.loc[val_idx, "split"] = SPLIT_VAL
+    return pool
+
+
+def build_manifest(
+    root: Path | None = None,
+    wildfake: bool = False,
+    generators: list[str] | None = None,
+    per_generator: int = 4000,
+) -> pd.DataFrame:
     """Scan every available dataset and emit the project-wide index."""
     root = root or data_root()
     frames = [_scan_sid_set(root)]
+    if wildfake:
+        pool = scan_wildfake_pool(root, generators, per_generator)
+        if len(pool):
+            frames.append(pool)
 
     # WildFake and the held-out benchmark join here once stages 1 and 3 land.
     # Kept as an explicit gap rather than a silent one.
