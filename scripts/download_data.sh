@@ -32,7 +32,9 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # Refuse to start a stage that cannot fit. Cheaper than a failure 20 GB in.
 require_space() {
   local need_gb=$1 avail_gb
-  avail_gb=$(df -g "$DATA_ROOT" | awk 'NR==2 {print $4}')
+  # -Pk for portability: BSD df has no -BG, GNU df has no -g, and -P stops long
+  # Lustre/GPFS mount paths from wrapping onto a second line.
+  avail_gb=$(df -Pk "$DATA_ROOT" | awk 'NR==2 {print int($4/1048576)}')
   log "disk: ${avail_gb} GB available, stage needs ~${need_gb} GB"
   [ "$avail_gb" -ge "$need_gb" ] || die \
     "Not enough space at $DATA_ROOT (${avail_gb} GB free, need ${need_gb} GB).
