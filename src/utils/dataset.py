@@ -361,3 +361,28 @@ class LaunderedPairs(Dataset):
             torch.tensor(float(row.y)),
             torch.from_numpy(transforms.severity_vector(log)),
         )
+
+
+class CellDataset(Dataset):
+    """One battery cell applied deterministically -- for evaluation, no curriculum."""
+
+    def __init__(self, df, preprocess, cell, root=None, pre_extracted=False):
+        self.rows = df.reset_index(drop=True)
+        self.preprocess = preprocess
+        self.root = root or data_root()
+        self.pre_extracted = pre_extracted
+        op, kwargs = transforms.BATTERY[cell]
+        self.chain = [] if op == "none" else [(op, kwargs)]
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        row = self.rows.iloc[i]
+        img = load_image(row.path, self.root)
+        if not self.pre_extracted:
+            from .features import align_bias      # local: avoids a cycle
+            img = align_bias(img)
+        if self.chain:
+            img, _ = transforms.apply_chain(img, self.chain)
+        return self.preprocess(img), torch.tensor(float(row.y))

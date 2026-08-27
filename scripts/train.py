@@ -26,7 +26,7 @@ from src.components.peft import apply_peft, count_params     # noqa: E402
 from src.losses import detection_loss                        # noqa: E402
 from src.models.detector import Detector                     # noqa: E402
 from src.utils import dataset as data                        # noqa: E402
-from src.utils.dataset import LaunderedPairs                 # noqa: E402
+from src.utils.dataset import CellDataset, LaunderedPairs    # noqa: E402
 from src.utils.features import DEFAULT_BACKBONE, pick_device  # noqa: E402
 
 logging.basicConfig(
@@ -44,6 +44,38 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+@torch.no_grad()
+def validate(model, val_df, preprocess, root, device, batch_size, workers,
+             pre_extracted, cells=("clean", "jpeg_30", "resize_0.25", "noise_0.10")):
+    """Per-epoch val AUC on clean and on a few laundered cells.
+
+    Without this the run is blind: training loss converges inside the first
+    epoch, and nothing tells you whether later epochs still help or are just
+    memorising. The gap between clean and laundered AUC IS the quantity the
+    §6.1 claim is about, so watching it per epoch turns a single end-of-run
+    number into a curve.
+    """
+    from sklearn.metrics import roc_auc_score
+    model.eval()
+    out = {}
+    for cell in cells:
+        loader = DataLoader(
+            CellDataset(val_df, preprocess, cell, root, pre_extracted),
+            batch_size=batch_size, num_workers=workers,
+        )
+        probs, ys = [], []
+        for x, y in loader:
+            probs.append(torch.sigmoid(model(x.to(device))["logit"]).float().cpu())
+            ys.append(y)
+        probs, ys = torch.cat(probs).numpy(), torch.cat(ys).numpy()
+        out[f"val_auc_{cell}"] = roc_auc_score(ys, probs)
+    out["val_robustness_gap"] = out["val_auc_clean"] - np.mean(
+        [v for k, v in out.items() if k != "val_auc_clean"]
+    )
+    model.train()
+    return out
 
 
 def build_model(arm: str, rank: int, conditioner: str, backbone_name: str, device: str):
@@ -166,8 +198,14 @@ def main():
                 break
 
         gpu_seconds += __import__("time").time() - epoch_start
+
+        val_df = manifest[manifest.split == data.SPLIT_VAL]
+        metrics = validate(model, val_df, preprocess, root, device,
+                           args.batch_size, args.workers, pre_extracted)
+        logger.info("ep%d  %s", epoch,
+                    "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
         if run:
-            wandb.log({"gpu_hours": gpu_seconds / 3600}, step=global_step)
+            wandb.log({**metrics, "gpu_hours": gpu_seconds / 3600}, step=global_step)
 
     out = Path(args.out) / f"{run_name}.pt"
     out.parent.mkdir(parents=True, exist_ok=True)
