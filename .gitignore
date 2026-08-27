@@ -216,3 +216,32 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- aigc-detector ----
+# Datasets never live in the repo. Point AIGCD_DATA_ROOT at real storage
+# (cluster scratch / external volume) and symlink data/ to it.
+data/
+*.zip
+*.parquet
+
+# Cached features / VAE latents — regenerable, large
+cache/
+*.npy
+*.npz
+*.pt
+*.pth
+*.safetensors
+
+# Model checkpoints
+checkpoints/
+runs/
+wandb/
+
+# Results are COMMITTED (tables, figures, error cards) — do not ignore results/
+
+mlruns/
+mlartifacts/
+
+CLAUDE.md
+.DS_Store
+.png
