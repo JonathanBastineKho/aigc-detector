@@ -55,10 +55,11 @@ def _scan_sid_set(root: Path, val_frac: float = 0.15, seed: int = 0) -> pd.DataF
     """
     shards = sorted((root / "sid_set" / "data").glob("validation-*.parquet"))
     if not shards:
-        raise FileNotFoundError(
-            f"No SID_Set parquets under {root / 'sid_set' / 'data'}. "
-            "Run: ./scripts/download_data.sh stage2"
-        )
+        # Not fatal: once images are extracted the parquets are disposable, and
+        # cluster quotas make keeping 16.8 GB around just to rebuild an index a
+        # bad trade. extract_images.py merges into an existing manifest instead.
+        return pd.DataFrame(columns=["image_id", "path", "label",
+                                     "source", "generator", "split"])
 
     frames = []
     for shard in shards:

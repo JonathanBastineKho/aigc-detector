@@ -77,6 +77,11 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--n-unseen", type=int, default=800)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--split", default="val", choices=["val", "heldout"],
+                    help="'heldout' evaluates TikTok's benchmark, never trained on")
+    ap.add_argument("--cells", nargs="+",
+                    help="battery cells to score (default: all 17)")
+    ap.add_argument("--limit", type=int, help="cap images, for quick passes")
     ap.add_argument("--project", default="aigc-detector")
     args = ap.parse_args()
 
@@ -89,16 +94,27 @@ def main():
     preprocess = timm.data.create_transform(**cfg, is_training=False)
 
     if args.manifest:
-        mf, pre = pd.read_csv(args.manifest), True
+        mf = pd.read_csv(args.manifest)
+        # Held-out images are extracted raw, so they still need bias alignment;
+        # the training pool was already aligned on disk.
+        pre = args.split != "heldout"
     else:
         mf, pre = data.build_manifest(root), False
-    val = mf[mf.split == data.SPLIT_VAL]
+
+    want = data.SPLIT_HELDOUT if args.split == "heldout" else data.SPLIT_VAL
+    val = mf[mf.split == want]
+    if args.limit:
+        val = val.head(args.limit)
+    if not len(val):
+        raise SystemExit(f"no rows with split=={want} in {args.manifest}")
+    print(f"evaluating {len(val)} images from split={want}")
 
     # 1. robustness grid across every battery cell
-    rows = []
-    for cell in T.BATTERY:
+    rows, raw_scores, raw_y = [], {}, None
+    for cell in (args.cells or list(T.BATTERY)):
         p, y = score(model, val, preprocess, cell, root, device,
                      args.batch_size, args.workers, pre)
+        raw_scores[cell], raw_y = p, y
         rows.append({"cell": cell, "auc": roc_auc_score(y, p),
                      "acc": float(((p > .5) == y).mean())})
         print(f"  {cell:12s} auc={rows[-1]['auc']:.4f}  acc={rows[-1]['acc']:.4f}")
@@ -111,7 +127,8 @@ def main():
     #    holding one out while training on the other is not a real test.
     #    Skipped rather than fatal if the archives are absent: the grid above
     #    costs minutes and must not be thrown away over a missing file.
-    have_unseen = (root / ADM_ZIP).exists() and (root / REAL_ZIP).exists()
+    have_unseen = (args.split != "heldout"
+                   and (root / ADM_ZIP).exists() and (root / REAL_ZIP).exists())
     if have_unseen:
         fakes = data.scan_wildfake_zip(ADM_ZIP, "ADM", data.SID_SYNTHETIC, root,
                                        limit=args.n_unseen)
@@ -140,14 +157,20 @@ def main():
     for k, v in summary.items():
         print(f"  {k:22s} {v:,}" if isinstance(v, int) else f"  {k:22s} {v:.4f}")
 
-    out = Path(f"results/tables/eval_{args.checkpoint.stem}.csv")
+    suffix = "" if args.split == "val" else f"_{args.split}"
+    out = Path(f"results/tables/eval_{args.checkpoint.stem}{suffix}.csv")
+    if "clean" in {r["cell"] for r in rows}:
+        np.savez_compressed(
+            root / "cache" / f"scores_{args.checkpoint.stem}{suffix}.npz",
+            **{f"p_{c}": v for c, v in raw_scores.items()}, y=raw_y,
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     grid.assign(**summary).to_csv(out, index=False)
 
     # Attach to the training run so config, GPU-hours and results share one row.
     rid = ckpt.get("wandb_run_id")
     if rid:
-        wandb.init(project=args.project, id=rid, resume="must")
+        wandb.init(project=args.project, id=rid, resume="allow")
         wandb.log({**summary, **{f"auc_{r.cell}": r.auc for r in grid.itertuples()}})
         wandb.finish()
         print(f"\nlogged to W&B run {rid}")
