@@ -15,6 +15,7 @@ import timm
 import torch
 import wandb
 from sklearn.metrics import roc_auc_score
+from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -54,7 +55,7 @@ def score(model, df, preprocess, cell, root, device, bs, workers, pre=False):
     dl = DataLoader(Cell(df, preprocess, cell, root, pre), batch_size=bs,
                     num_workers=workers)
     ps, ys = [], []
-    for x, y in dl:
+    for x, y in tqdm(dl, desc=f"{cell:12s}", unit="batch", leave=False):
         ps.append(torch.sigmoid(model(x.to(device))["logit"]).float().cpu().numpy())
         ys.append(y.numpy())
     return np.concatenate(ps), np.concatenate(ys)

@@ -82,19 +82,25 @@ def leakage_check(df: pd.DataFrame, root: Path, train_manifest: Path | None):
                        "Run with --train-manifest before reporting any number.")
         return
     import imagehash
-    from PIL import Image
 
     def hashes(paths):
+        # load_image, not Image.open: training rows may address images inside
+        # parquet shards or zips, which PIL cannot open directly.
         out = {}
         for p in tqdm(paths, desc="phash", unit="img"):
             try:
-                out.setdefault(str(imagehash.phash(Image.open(root / p))), []).append(p)
+                out.setdefault(str(imagehash.phash(data.load_image(p, root))), []).append(p)
             except Exception:
                 continue
         return out
 
     train = pd.read_csv(train_manifest)
+    # Exclude held-out rows: the manifest may already index the benchmark, and
+    # comparing it against itself would report every image as a collision.
+    train = train[train.split != data.SPLIT_HELDOUT]
     train_h = hashes(train[train.y == 0].path.tolist())   # reals only: COCO is real
+    logger.info("checking %d held-out reals against %d training reals",
+                int((df.y == 0).sum()), len(train_h))
     held_h = hashes(df[df.y == 0].path.tolist())
 
     collisions = set(train_h) & set(held_h)
