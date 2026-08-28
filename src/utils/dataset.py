@@ -372,8 +372,12 @@ class CellDataset(Dataset):
         self.preprocess = preprocess
         self.root = root or data_root()
         self.pre_extracted = pre_extracted
-        op, kwargs = transforms.BATTERY[cell]
-        self.chain = [] if op == "none" else [(op, kwargs)]
+        # A name may refer to a single battery cell or a composed chain.
+        if cell in transforms.CHAIN_BATTERY:
+            self.chain = transforms.CHAIN_BATTERY[cell]
+        else:
+            op, kwargs = transforms.BATTERY[cell]
+            self.chain = [] if op == "none" else [(op, kwargs)]
 
     def __len__(self):
         return len(self.rows)
