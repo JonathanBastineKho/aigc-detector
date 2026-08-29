@@ -18,13 +18,15 @@ import sys
 from pathlib import Path
 
 import gradio as gr
-import joblib
 import numpy as np
+import timm
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from src.utils import dataset as data, transforms as T          # noqa: E402
-from src.utils.features import align_bias, load_backbone, pick_device  # noqa: E402
+from src.components.peft import apply_peft                      # noqa: E402
+from src.models.detector import Detector                        # noqa: E402
+from src.utils import transforms as T                           # noqa: E402
+from src.utils.features import align_bias, pick_device          # noqa: E402
 
 # Progressive laundering: each stage adds an op, mirroring an image being
 # reposted, screenshotted and re-encoded on its way across platforms.
@@ -47,32 +49,49 @@ ABSTAIN_MARGIN = 0.30       # ...and the score is not decisive enough
 MODEL = {}
 
 
-def load(model_path: Path | None = None):
-    root = data.data_root()
-    bundle = joblib.load(model_path or root / "cache" / "probe.joblib")
+def load(checkpoint: Path):
+    """Build the detector. Slim checkpoints carry only adapters and heads --
+    the frozen DINOv3 base is rebuilt from timm, which is exact because
+    apply_peft's SVD is deterministic given the same pretrained weights."""
+    ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    targs = ck["args"]
     device = pick_device()
-    backbone, preprocess = load_backbone(bundle["backbone"], device)
-    MODEL.update(clf=bundle["clf"], backbone=backbone,
-                 preprocess=preprocess, device=device)
+
+    backbone = timm.create_model(targs["backbone"], pretrained=True, num_classes=0)
+    backbone = apply_peft(backbone, mode=targs["arm"], r=targs["rank"])
+    model = Detector(backbone, dim=backbone.num_features,
+                     conditioner=targs["conditioner"])
+    missing, unexpected = model.load_state_dict(ck["state_dict"], strict=False)
+    if unexpected:
+        raise SystemExit(f"unexpected keys in checkpoint: {unexpected[:3]}")
+    if missing and not ck.get("slim"):
+        raise SystemExit(f"missing keys in a full checkpoint: {missing[:3]}")
+
+    cfg = timm.data.resolve_model_data_config(backbone)
+    MODEL.update(model=model.eval().to(device), device=device,
+                 preprocess=timm.data.create_transform(**cfg, is_training=False),
+                 name=checkpoint.stem)
 
 
 @torch.no_grad()
-def raw_score(img) -> float:
-    x = MODEL["preprocess"](img).unsqueeze(0).to(MODEL["device"])
-    feats = MODEL["backbone"](x).float().cpu().numpy()
-    return float(MODEL["clf"].predict_proba(feats)[0, 1])
+def score(img) -> tuple[float, np.ndarray]:
+    """Returns p(AI) and the model's ESTIMATED severity vector.
 
-
-def severity_corrected(p: float, sev: np.ndarray) -> tuple[str, float, bool]:
-    """Shift the decision threshold by how laundered the image is, and abstain
-    when the evidence is too thin to place it either side.
-
-    NOTE: severity is KNOWN here because the demo applied the transforms. In the
-    deployed system the severity head estimates it from the image alone -- this
-    is the one place the demo is ahead of the model.
+    s_hat is inferred from the image alone -- the demo does not tell the model
+    what it did. That is the difference between showing the system work and
+    showing a script.
     """
-    total = float(sev.max())
-    thr = 0.5 * (1.0 - total)                       # threshold falls with severity
+    x = MODEL["preprocess"](img).unsqueeze(0).to(MODEL["device"])
+    out = MODEL["model"](x)
+    return (float(torch.sigmoid(out["logit"])[0]),
+            out["s_hat"][0].float().cpu().numpy())
+
+
+def severity_corrected(p: float, s_hat: np.ndarray) -> tuple[str, float, bool]:
+    """Shift the decision threshold by how laundered the model THINKS it is,
+    and abstain when the evidence is too thin to place it either side."""
+    total = float(s_hat.max())
+    thr = 0.5 * (1.0 - total)
     if total > ABSTAIN_SEVERITY and abs(p - thr) < ABSTAIN_MARGIN:
         return "ESCALATE", total, True
     return ("AI-generated" if p > thr else "Authentic"), total, False
@@ -83,25 +102,26 @@ def run(img, stage_idx: int):
         return None, {}, "—", {}, "—", "upload an image to begin"
 
     label, chain = STAGES[int(stage_idx)]
-    base_img = align_bias(img, 96, 224)             # same preprocessing as training
+    base_img = align_bias(img, 96, 224)
     laundered, log = T.apply_chain(base_img, chain)
-    sev = T.severity_vector(log)
+    true_sev = T.severity_vector(log)
 
-    p = raw_score(laundered)
+    p, s_hat = score(laundered)
 
-    # Baseline: a fixed 0.5 threshold, no notion of degradation. This is what a
-    # standard detector does, and it is what goes confidently wrong.
+    # Left panel: the same detector with a fixed 0.5 threshold and no
+    # abstention -- what a standard system does.
     base_label = "AI-generated" if p > 0.5 else "Authentic"
     base_conf = p if p > 0.5 else 1 - p
 
-    ours_label, total_sev, abstained = severity_corrected(p, sev)
+    ours_label, total_sev, abstained = severity_corrected(p, s_hat)
     ours_conf = 0.0 if abstained else abs(p - 0.5 * (1 - total_sev)) * 2
 
-    sev_txt = "  ".join(
-        f"{n}={v:.2f}" for n, v in zip(T.OP_NAMES, sev) if v > 0.01
-    ) or "none"
+    shown = "  ".join(f"{n}={v:.2f}" for n, v in zip(T.OP_NAMES, s_hat) if v > 0.05)
+    actual = "  ".join(f"{n}={v:.2f}" for n, v in zip(T.OP_NAMES, true_sev) if v > 0.01)
 
-    note = (f"**{label}** — estimated severity: {sev_txt}"
+    note = (f"**{label}**\n\n"
+            f"model's estimate: `{shown or 'clean'}`  \n"
+            f"actually applied: `{actual or 'nothing'}`"
             + ("\n\n⚠️ laundered past reliable range — routed to human review"
                if abstained else ""))
 
@@ -135,11 +155,11 @@ def build():
 
         with gr.Row():
             with gr.Column():
-                gr.Markdown("## Standard detector")
+                gr.Markdown("## Fixed threshold, no abstention")
                 base_hdr = gr.Markdown("—")
                 base_out = gr.Label(num_top_classes=2, show_label=False)
             with gr.Column():
-                gr.Markdown("## Ours")
+                gr.Markdown("## Severity-aware + abstention")
                 ours_hdr = gr.Markdown("—")
                 ours_out = gr.Label(num_top_classes=2, show_label=False)
 
@@ -151,8 +171,9 @@ def build():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=Path)
+    ap.add_argument("--checkpoint", type=Path,
+                    default=Path("checkpoints/svd_r32_film_slim.pt"))
     ap.add_argument("--share", action="store_true", help="public 72h tunnel")
     args = ap.parse_args()
-    load(args.model)
+    load(args.checkpoint)
     build().launch(share=args.share)
