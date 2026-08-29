@@ -139,10 +139,16 @@ def main():
             return (df.groupby("y", group_keys=False)
                       .apply(lambda g: g.head(max(1, n // 2))).reset_index(drop=True))
         calib_df, test_df = sample(calib_df, args.limit), sample(test_df, args.limit)
-    # Rows addressing a parquet row or zip member still need bias alignment;
-    # pre-extracted files already have it baked in.
     def is_pre(df):
-        return not df.path.iloc[0].count("#") and "::" not in df.path.iloc[0]
+        """Has bias alignment already been applied on disk?
+
+        Only extract_images.py bakes it in, and it writes under extracted/.
+        build_heldout.py copies benchmark images out of the zips RAW, so they
+        still need aligning at load time. Guessing from the path format was
+        wrong here and silently reintroduced the geometry/format confound --
+        AUC 0.998 instead of 0.973.
+        """
+        return df.path.iloc[0].startswith("extracted/")
     pre_cal, pre_test = is_pre(calib_df), is_pre(test_df)
     logger.info("calibrate on %d val images (pre_extracted=%s), report on %d "
                 "benchmark images (pre_extracted=%s)",
