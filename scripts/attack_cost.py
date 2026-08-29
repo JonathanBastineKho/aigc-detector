@@ -188,6 +188,15 @@ def main():
                   args.batch_size, args.workers)
 
     flipped = ~np.isnan(cost)
+
+    # Flip rate at a fixed laundering budget -- the analogue of robust accuracy
+    # at epsilon. Median cost is computed only over images that flipped, so it
+    # describes a biased subsample; this is comparable across models regardless
+    # of how many flip at all.
+    budgets = (0.2, 0.4, 0.6, 0.8)
+    at_budget = {f"flip_at_{b}": float((np.nan_to_num(cost, nan=np.inf) <= b).mean())
+                 for b in budgets}
+
     summary = {
         "model": name,
         "split": args.split,
@@ -200,11 +209,24 @@ def main():
         # leaves reals alone. Splitting the flip rate shows that directly.
         "flip_rate_fake": float(flipped[rows.y == 1].mean()),
         "flip_rate_real": float(flipped[rows.y == 0].mean()),
+        **at_budget,
     }
     for k, v in summary.items():
         logger.info("  %-22s %s", k, f"{v:.4f}" if isinstance(v, float) else v)
 
-    out = Path(f"results/tables/attack_cost{'' if args.split == 'val' else '_' + args.split}.csv")
+    # Per-image costs: the survival curve and any other budget slice are
+    # derivable from these, so a different question later costs no GPU time.
+    suffix = "" if args.split == "val" else f"_{args.split}"
+    per_image = Path(f"results/tables/attack_cost_per_image_{name}{suffix}.csv")
+    per_image.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "image_id": rows.image_id, "y": rows.y,
+        "attack_cost": cost,                 # NaN = never flipped
+        "flipped": flipped,
+    }).to_csv(per_image, index=False)
+    logger.info("wrote %s", per_image)
+
+    out = Path(f"results/tables/attack_cost{suffix}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame([summary])
     if out.exists():
