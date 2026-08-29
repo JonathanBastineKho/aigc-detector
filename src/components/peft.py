@@ -16,6 +16,8 @@ directions. Minor-subspace init starts where the original map matters least.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 
@@ -98,6 +100,26 @@ def apply_peft(
         parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
         setattr(parent, name.rsplit(".", 1)[-1], AdaptedLinear(module, r, mode))
     return model
+
+
+@contextmanager
+def adapters_disabled(model: nn.Module):
+    """Temporarily restore the un-adapted backbone.
+
+    AdaptedLinear computes W.x + scale*(BA).x, and the frozen W is the original
+    pretrained weight, so scale=0 recovers the backbone as downloaded -- without
+    a second 1.2 GB copy in memory. Lets one loaded model serve as both the
+    trained detector and the frozen baseline.
+    """
+    mods = [m for m in model.modules() if isinstance(m, AdaptedLinear)]
+    saved = [m.scale for m in mods]
+    for m in mods:
+        m.scale = 0.0
+    try:
+        yield model
+    finally:
+        for m, sc in zip(mods, saved):
+            m.scale = sc
 
 
 def count_params(model: nn.Module) -> tuple[int, int]:
