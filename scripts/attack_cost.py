@@ -123,6 +123,8 @@ def main():
     ap.add_argument("--checkpoint", type=Path)
     ap.add_argument("--probe", action="store_true", help="use the frozen linear probe")
     ap.add_argument("--manifest", type=Path)
+    ap.add_argument("--split", default="val", choices=["val", "heldout"],
+                    help="'heldout' attacks TikTok's benchmark")
     ap.add_argument("--n", type=int, default=500, help="images to attack")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--workers", type=int, default=4)
@@ -156,10 +158,23 @@ def main():
             return torch.sigmoid(model(x)["logit"]).float().cpu().numpy()
 
     if args.manifest:
-        mf, pre = pd.read_csv(args.manifest), True
+        mf = pd.read_csv(args.manifest)
+        # Only extract_images.py bakes alignment in, and it writes under
+        # extracted/. Benchmark images come out of the zips raw.
+        pre = mf.path.iloc[0].startswith("extracted/")
     else:
         mf, pre = data.build_manifest(root), False
-    val = mf[mf.split == data.SPLIT_VAL].head(args.n).reset_index(drop=True)
+
+    want = data.SPLIT_HELDOUT if args.split == "heldout" else data.SPLIT_VAL
+    rows_all = mf[mf.split == want]
+    if not len(rows_all):
+        raise SystemExit(f"no rows with split=={want} in {args.manifest}")
+    # Stratified: manifests are class-ordered, so head() would take one class.
+    val = (rows_all.groupby("y", group_keys=False)
+                   .apply(lambda g: g.head(max(1, args.n // 2)))
+                   .reset_index(drop=True))
+    logger.info("attacking %d images from split=%s (pre_extracted=%s)",
+                len(val), want, pre)
 
     # Only images the detector already gets right can be "attacked".
     p0, _ = scores_at(model_fn, val, preprocess, [], root, pre, device,
@@ -175,6 +190,7 @@ def main():
     flipped = ~np.isnan(cost)
     summary = {
         "model": name,
+        "split": args.split,
         "n_attacked": len(rows),
         "flip_rate": float(flipped.mean()),
         "median_attack_cost": float(np.nanmedian(cost)) if flipped.any() else 1.0,
@@ -188,7 +204,7 @@ def main():
     for k, v in summary.items():
         logger.info("  %-22s %s", k, f"{v:.4f}" if isinstance(v, float) else v)
 
-    out = Path("results/tables/attack_cost.csv")
+    out = Path(f"results/tables/attack_cost{'' if args.split == 'val' else '_' + args.split}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame([summary])
     if out.exists():
