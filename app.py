@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import gradio as gr
+import joblib
 import numpy as np
 import timm
 import torch
@@ -72,6 +73,24 @@ def load(checkpoint: Path):
                  preprocess=timm.data.create_transform(**cfg, is_training=False),
                  name=checkpoint.stem)
 
+    # The jointly-trained severity head collapsed to predicting a constant
+    # (0.396 correlation across a 0.025 range), so it cannot drive the
+    # abstention rule. A ridge fitted separately on the same features reaches
+    # ~0.66 with full range. Prefer it when available; fall back to the head so
+    # the app still runs without one.
+    stem = checkpoint.stem.replace("_slim", "")
+    for cand in (checkpoint.parent.parent / "data" / "cache" / f"severity_{checkpoint.stem}.joblib",
+                 Path("data/cache") / f"severity_{stem}.joblib",
+                 Path("data/cache") / f"severity_{checkpoint.stem}.joblib"):
+        if cand.exists():
+            MODEL["severity"] = joblib.load(cand)["ridge"]
+            print(f"severity estimator: {cand.name}")
+            break
+    else:
+        MODEL["severity"] = None
+        print("severity estimator: NONE -- falling back to the collapsed head; "
+              "abstention will not fire")
+
 
 @torch.no_grad()
 def score(img) -> tuple[float, np.ndarray]:
@@ -83,8 +102,14 @@ def score(img) -> tuple[float, np.ndarray]:
     """
     x = MODEL["preprocess"](img).unsqueeze(0).to(MODEL["device"])
     out = MODEL["model"](x)
-    return (float(torch.sigmoid(out["logit"])[0]),
-            out["s_hat"][0].float().cpu().numpy())
+    p = float(torch.sigmoid(out["logit"])[0])
+
+    if MODEL["severity"] is not None:
+        h = out["h"].float().cpu().numpy()
+        s_hat = np.clip(MODEL["severity"].predict(h)[0], 0.0, 1.0)
+    else:
+        s_hat = out["s_hat"][0].float().cpu().numpy()
+    return p, s_hat
 
 
 def severity_corrected(p: float, s_hat: np.ndarray) -> tuple[str, float, bool]:

@@ -59,12 +59,17 @@ def extract(root: Path, out_dir: Path) -> pd.DataFrame:
             dest = out_dir / name
             dest.mkdir(parents=True, exist_ok=True)
             for m in tqdm(members, desc=name, unit="img"):
-                target = dest / Path(m).name
+                # Flatten the full member path into the filename. DALL-E's six
+                # subfolders reuse basenames -- writing by Path(m).name silently
+                # overwrote 5,124 of 8,843 images and the manifest then pointed
+                # multiple rows at the same file.
+                flat = Path(m).relative_to(Path(m).parts[0]).as_posix().replace("/", "__")
+                target = dest / flat
                 if not target.exists():
                     with zf.open(m) as src, open(target, "wb") as dst:
                         dst.write(src.read())
                 rows.append({
-                    "image_id": f"ho_{name}_{Path(m).stem}",
+                    "image_id": f"ho_{name}_{Path(flat).stem}",
                     "path": str(target.relative_to(root)),
                     "label": label,
                     "y": int(label != data.SID_REAL),
@@ -72,7 +77,18 @@ def extract(root: Path, out_dir: Path) -> pd.DataFrame:
                     "generator": name,
                     "split": data.SPLIT_HELDOUT,
                 })
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    for _, _, _, expected, name in SUBSETS:
+        sub = df[df.generator == name]
+        n_files = sub.path.nunique()
+        if n_files != expected:
+            raise SystemExit(
+                f"{name}: {len(sub)} rows but only {n_files} distinct files on "
+                f"disk (expected {expected}). Filenames are colliding."
+            )
+        logger.info("%s: %d rows, %d distinct files -- no collisions", name,
+                    len(sub), n_files)
+    return df
 
 
 def leakage_check(df: pd.DataFrame, root: Path, train_manifest: Path | None):
