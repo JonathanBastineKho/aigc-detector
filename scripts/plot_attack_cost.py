@@ -21,10 +21,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# Severity is normalised 0..1; these translate it back into something an
-# attacker would recognise (see severity_vector in utils/transforms.py).
-def as_jpeg(s):  return 95 - 70 * s
-def as_scale(s): return 1 - 0.75 * s
+# Cost is perceptual damage: 1 - SSIM against the untouched image. 0 means
+# identical, higher means more visibly degraded.
+BUDGETS = (0.05, 0.10, 0.20, 0.40)
 
 
 def main():
@@ -38,7 +37,7 @@ def main():
         raise SystemExit(f"no per-image files matching {args.glob}. "
                          "Run attack_cost.py first (needs the updated version).")
 
-    budgets = np.linspace(0, 1, 101)
+    budgets = np.linspace(0, 0.6, 121)
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(12, 4.6))
 
     table = []
@@ -57,21 +56,18 @@ def main():
         ax2.plot(budgets, [(cf > b).mean() for b in budgets], lw=2, label=name)
 
         table.append({"model": name,
-                      **{f"survive@{b}": float((cost > b).mean())
-                         for b in (0.2, 0.4, 0.6, 0.8)},
+                      **{f"survive@{b}": float((cost > b).mean()) for b in BUDGETS},
                       "never_flipped": float(np.isinf(cost).mean())})
 
     for a, title in ((ax, "All correct predictions"), (ax2, "AI images only")):
-        a.set_xlabel("laundering budget (severity)")
+        a.set_xlabel("perceptual damage the attacker must accept  (1 - SSIM)")
         a.set_ylabel("fraction still classified correctly")
         a.set_title(title, fontsize=11)
         a.grid(alpha=.3)
         a.legend(fontsize=9)
         a.set_ylim(0, 1.02)
-        top = a.secondary_xaxis("top", functions=(lambda s: s, lambda s: s))
-        top.set_xticks([0.2, 0.4, 0.6, 0.8])
-        top.set_xticklabels([f"JPEG {as_jpeg(b):.0f}\n{as_scale(b):.2f}x"
-                             for b in (0.2, 0.4, 0.6, 0.8)], fontsize=8)
+        for b in BUDGETS:
+            a.axvline(b, color="gray", ls=":", lw=.7, alpha=.6)
 
     fig.suptitle("Attack cost: how much visible damage evasion requires", fontsize=13)
     fig.tight_layout()

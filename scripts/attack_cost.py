@@ -32,6 +32,8 @@ from src.components.peft import apply_peft            # noqa: E402
 from src.models.detector import Detector              # noqa: E402
 from src.utils import dataset as data                 # noqa: E402
 from src.utils import transforms as T                 # noqa: E402
+from skimage.metrics import structural_similarity                      # noqa: E402
+
 from src.utils.features import align_bias, load_backbone, pick_device  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
@@ -60,7 +62,14 @@ LADDERS = {
 
 
 class Rung(Dataset):
-    """Images with one ladder rung applied. Cumulative for chains, single otherwise."""
+    """Images with one ladder rung applied. Cumulative for chains, single otherwise.
+
+    Returns the perceptual damage (1 - SSIM against the untouched original)
+    alongside the hand-defined severity. SSIM is the primary cost: it puts every
+    operation on one physically meaningful axis instead of a normalisation I
+    chose, and it measures accumulated damage correctly for chains, where taking
+    the max over operations understates a six-step laundering pipeline.
+    """
 
     def __init__(self, rows, preprocess, ops, root, pre_extracted):
         self.rows, self.preprocess, self.ops = rows, preprocess, ops
@@ -74,19 +83,26 @@ class Rung(Dataset):
         img = data.load_image(row.path, self.root)
         if not self.pre:
             img = align_bias(img)
-        img, log = T.apply_chain(img, self.ops)
-        return self.preprocess(img), float(T.severity_vector(log).max())
+        original = np.asarray(img.convert("L"), dtype=np.float32)
+
+        out, log = T.apply_chain(img, self.ops)
+        laundered = np.asarray(out.convert("L"), dtype=np.float32)
+
+        ssim = 1.0 if not self.ops else float(
+            structural_similarity(original, laundered, data_range=255.0))
+        return (self.preprocess(out), 1.0 - ssim,
+                float(T.severity_vector(log).max()))
 
 
 @torch.no_grad()
 def scores_at(model_fn, rows, preprocess, ops, root, pre, device, bs, workers):
     loader = DataLoader(Rung(rows, preprocess, ops, root, pre),
                         batch_size=bs, num_workers=workers)
-    out, cost = [], []
-    for x, sev in loader:
+    out, dmg, sev = [], [], []
+    for x, d, s_ in loader:
         out.append(model_fn(x.to(device)))
-        cost.append(sev.numpy())
-    return np.concatenate(out), np.concatenate(cost)
+        dmg.append(d.numpy()); sev.append(s_.numpy())
+    return np.concatenate(out), np.concatenate(dmg), np.concatenate(sev)
 
 
 def search(model_fn, rows, preprocess, root, pre, device, bs, workers):
@@ -96,7 +112,8 @@ def search(model_fn, rows, preprocess, root, pre, device, bs, workers):
     costs one forward pass over only the images still surviving.
     """
     y = rows.y.to_numpy()
-    best = np.full(len(rows), np.nan)          # nan = never flipped
+    best = np.full(len(rows), np.nan)          # nan = never flipped (perceptual)
+    best_sev = np.full(len(rows), np.nan)      # the old severity scale, for comparison
 
     for name, rungs in LADDERS.items():
         alive = np.ones(len(rows), dtype=bool)
@@ -105,17 +122,18 @@ def search(model_fn, rows, preprocess, root, pre, device, bs, workers):
                 break
             # Chains accumulate; single-op ladders replace.
             ops = rungs[:k + 1] if name == "chain" else [op]
-            p, cost = scores_at(model_fn, rows[alive], preprocess, ops,
-                                root, pre, device, bs, workers)
+            p, dmg, sev = scores_at(model_fn, rows[alive], preprocess, ops,
+                                    root, pre, device, bs, workers)
             flipped = (p > 0.5) != y[alive]
 
             idx = np.where(alive)[0][flipped]
-            for j, c in zip(idx, cost[flipped]):
+            for j, c, sv in zip(idx, dmg[flipped], sev[flipped]):
                 best[j] = c if np.isnan(best[j]) else min(best[j], c)
+                best_sev[j] = sv if np.isnan(best_sev[j]) else min(best_sev[j], sv)
             alive[idx] = False
         logger.info("  ladder %-7s -> %d/%d flipped", name,
                     int((~np.isnan(best)).sum()), len(rows))
-    return best
+    return best, best_sev
 
 
 def main():
@@ -177,15 +195,15 @@ def main():
                 len(val), want, pre)
 
     # Only images the detector already gets right can be "attacked".
-    p0, _ = scores_at(model_fn, val, preprocess, [], root, pre, device,
-                      args.batch_size, args.workers)
+    p0, _, _ = scores_at(model_fn, val, preprocess, [], root, pre, device,
+                         args.batch_size, args.workers)
     correct = (p0 > 0.5) == val.y.to_numpy()
     logger.info("%s: %d/%d correct on clean -- attacking those",
                 name, correct.sum(), len(val))
     rows = val[correct].reset_index(drop=True)
 
-    cost = search(model_fn, rows, preprocess, root, pre, device,
-                  args.batch_size, args.workers)
+    cost, sev = search(model_fn, rows, preprocess, root, pre, device,
+                       args.batch_size, args.workers)
 
     flipped = ~np.isnan(cost)
 
@@ -193,7 +211,10 @@ def main():
     # at epsilon. Median cost is computed only over images that flipped, so it
     # describes a biased subsample; this is comparable across models regardless
     # of how many flip at all.
-    budgets = (0.2, 0.4, 0.6, 0.8)
+    # Perceptual budgets. 1-SSIM of 0.10 is a lightly degraded image; 0.40 is
+    # obviously damaged. Lower numbers than the old severity scale because SSIM
+    # saturates fast -- an image at 1-SSIM 0.5 barely resembles the original.
+    budgets = (0.05, 0.10, 0.20, 0.40)
     at_budget = {f"flip_at_{b}": float((np.nan_to_num(cost, nan=np.inf) <= b).mean())
                  for b in budgets}
 
@@ -202,8 +223,11 @@ def main():
         "split": args.split,
         "n_attacked": len(rows),
         "flip_rate": float(flipped.mean()),
+        # Primary: perceptual damage the attacker must accept (1 - SSIM).
         "median_attack_cost": float(np.nanmedian(cost)) if flipped.any() else 1.0,
         "p10_attack_cost": float(np.nanpercentile(cost, 10)) if flipped.any() else 1.0,
+        # Secondary: the old hand-normalised severity, kept for comparison.
+        "median_severity": float(np.nanmedian(sev)) if flipped.any() else 1.0,
         "never_flipped": int((~flipped).sum()),
         # Laundering is a one-way attack: it drags fakes toward "real" and
         # leaves reals alone. Splitting the flip rate shows that directly.
@@ -221,7 +245,8 @@ def main():
     per_image.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({
         "image_id": rows.image_id, "y": rows.y,
-        "attack_cost": cost,                 # NaN = never flipped
+        "attack_cost": cost,                 # 1 - SSIM; NaN = never flipped
+        "severity": sev,                     # old scale, for comparison
         "flipped": flipped,
     }).to_csv(per_image, index=False)
     logger.info("wrote %s", per_image)
