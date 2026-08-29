@@ -70,6 +70,21 @@ def fit_temperature(logits: np.ndarray, y: np.ndarray) -> float:
     return float(log_T.exp())
 
 
+def confidence(p: np.ndarray, thr: float) -> np.ndarray:
+    """Distance from the decision boundary, normalised per side.
+
+    Raw |p - thr| is wrong whenever thr != 0.5: with thr=0.96 a fake scoring
+    1.0 looks LESS confident than a real scoring 0.0, so abstention discards
+    the class it gets right. Normalising by the range available on each side
+    puts both classes on a 0..1 scale where 0 is at the boundary and 1 is
+    certain.
+    """
+    out = np.where(p > thr,
+                   (p - thr) / max(1.0 - thr, 1e-9),
+                   (thr - p) / max(thr, 1e-9))
+    return np.clip(out, 0.0, 1.0)
+
+
 def conformal_threshold(conf: np.ndarray, correct: np.ndarray, alpha: float) -> float:
     """Confidence cutoff such that error among answered samples is <= alpha.
 
@@ -167,9 +182,26 @@ def main():
 
     p_cal, p_test = probs(z_cal), probs(z_test)
 
-    # Threshold that maximises accuracy on calibration data, applied to test.
-    ths = np.quantile(p_cal, np.linspace(0.01, 0.99, 199))
-    best_thr = float(ths[np.argmax([((p_cal > t) == y_cal).mean() for t in ths])])
+    # Split val: fit on one half, verify in-distribution on the other. Without
+    # this we cannot tell a broken method from a distribution-shift effect.
+    rng = np.random.default_rng(0)
+    idx = rng.permutation(len(p_cal))
+    fit_i, hold_i = idx[: int(0.6 * len(idx))], idx[int(0.6 * len(idx)):]
+    p_fit, y_fit = p_cal[fit_i], y_cal[fit_i]
+    p_hold, y_hold = p_cal[hold_i], y_cal[hold_i]
+
+    ths = np.quantile(p_fit, np.linspace(0.01, 0.99, 199))
+    fitted_thr = float(ths[np.argmax([((p_fit > t) == y_fit).mean() for t in ths])])
+
+    # The fitted threshold only helps if it transfers. Check it on the held-out
+    # val half AND on the benchmark, and operate with whichever wins in-domain.
+    acc_half = ((p_hold > fitted_thr) == y_hold).mean()
+    acc_half_05 = ((p_hold > 0.5) == y_hold).mean()
+    op_thr = fitted_thr if acc_half >= acc_half_05 else 0.5
+    logger.info("threshold: fitted=%.3f (val-holdout acc %.4f) vs 0.5 (%.4f) "
+                "-> operating at %.3f", fitted_thr, acc_half, acc_half_05, op_thr)
+
+    p_cal, y_cal = p_fit, y_fit          # conformal calibrates on the fit half
 
     rows = [{
         "setting": "uncalibrated @0.5",
@@ -178,29 +210,39 @@ def main():
         "risk": float(((p_test > 0.5) != y_test).mean()),
         "auc": roc_auc_score(y_test, p_test),
     }, {
-        "setting": f"calibrated @{best_thr:.3f}",
+        "setting": f"calibrated @{op_thr:.3f}",
         "coverage": 1.0,
-        "accuracy": float(((p_test > best_thr) == y_test).mean()),
-        "risk": float(((p_test > best_thr) != y_test).mean()),
+        "accuracy": float(((p_test > op_thr) == y_test).mean()),
+        "risk": float(((p_test > op_thr) != y_test).mean()),
         "auc": roc_auc_score(y_test, p_test),
     }]
 
     # Selective prediction: confidence is distance from the decision boundary.
-    conf_cal = np.abs(p_cal - best_thr)
-    conf_test = np.abs(p_test - best_thr)
-    correct_cal = (p_cal > best_thr) == y_cal
-    correct_test = (p_test > best_thr) == y_test
+    conf_cal = confidence(p_cal, op_thr)
+    conf_test = confidence(p_test, op_thr)
+    correct_cal = (p_cal > op_thr) == y_cal
+    correct_test = (p_test > op_thr) == y_test
 
     for alpha in args.alphas:
         thr = conformal_threshold(conf_cal, correct_cal, alpha)
         answered = conf_test >= thr
         if answered.sum() == 0:
             continue
+        # Same policy on the held-out val half, where calibration and test ARE
+        # exchangeable and the guarantee is supposed to hold. The difference
+        # between the two rows is the price of generator shift.
+        conf_hold = confidence(p_hold, op_thr)
+        ans_hold = conf_hold >= thr
+        risk_hold = float(((p_hold[ans_hold] > op_thr) != y_hold[ans_hold]).mean()) \
+            if ans_hold.any() else float("nan")
+
         rows.append({
             "setting": f"abstain @ target risk {alpha:.0%}",
             "coverage": float(answered.mean()),
             "accuracy": float(correct_test[answered].mean()),
             "risk": float((~correct_test[answered]).mean()),
+            "risk_in_domain": risk_hold,
+            "guarantee_held": bool(risk_hold <= alpha) if risk_hold == risk_hold else None,
             "auc": roc_auc_score(y_test[answered], p_test[answered])
             if len(np.unique(y_test[answered])) > 1 else float("nan"),
         })
