@@ -36,6 +36,8 @@ def main() -> None:
     ap.add_argument("--splits", nargs="+", default=["train", "val"])
     ap.add_argument("--size", type=int, default=224)
     ap.add_argument("--jpeg-q", type=int, default=96)
+    ap.add_argument("--mode", default="crop", choices=["crop", "resize"],
+                    help="crop a native-resolution window, or resize the whole image")
     ap.add_argument("--out-dir", default="extracted")
     ap.add_argument("--limit", type=int, help="rows per split, for smoke tests")
     ap.add_argument("--wildfake", action="store_true",
@@ -106,7 +108,8 @@ def main() -> None:
             if dest.exists():
                 skipped += 1
             else:
-                align_bias(img, args.jpeg_q, args.size).save(dest, "JPEG", quality=args.jpeg_q)
+                align_bias(img, args.jpeg_q, args.size, args.mode).save(
+                    dest, "JPEG", quality=args.jpeg_q)
                 written += 1
 
             row = meta.loc[image_id]

@@ -46,12 +46,12 @@ STAGES = [
                           ("resize", {"scale": 0.5}), ("jpeg", {"quality": 30})]),
 ]
 
-# Measured range of the v2 severity head across the full battery
-# (results/tables/severity_head_test.csv). It ranks laundering reliably
-# (r = 0.71) but compresses a true 0..1 range into this window, so the bar
-# shows position WITHIN that window rather than an absolute damage figure --
-# printing "0.35" for a wrecked image would be wrong.
-SEV_MIN, SEV_MAX = 0.14, 0.35
+# The severity head's ABSOLUTE output does not transfer across image sources --
+# calibrated on SID_Set it pins to the ceiling on DALL-E crops. But it is
+# monotonic in laundering (r = 0.71), so we show the RISE relative to the same
+# image untouched. That cancels the per-image offset and is what the head can
+# actually support. 0.20 is its measured clean-to-worst span.
+SEV_SPAN = 0.20
 
 M = {}
 
@@ -86,8 +86,7 @@ def both_scores(img) -> tuple[float, float | None, float]:
     x = M["preprocess"](img).unsqueeze(0).to(M["device"])
     out = M["model"](x)
     ours = float(torch.sigmoid(out["logit"])[0])
-    raw = float(out["s_hat"][0].float().cpu().numpy().max())
-    sev = float(np.clip((raw - SEV_MIN) / (SEV_MAX - SEV_MIN), 0.0, 1.0))
+    sev = float(out["s_hat"][0].float().cpu().numpy().max())
 
     baseline = None
     if M["probe"] is not None:
@@ -119,12 +118,16 @@ def run(img, stage_idx: int):
     scored, _ = T.apply_chain(align_bias(img, 96, 224), chain)
 
     ours, baseline, sev = both_scores(scored)
+    # Baseline the estimate against this same image untouched.
+    _, _, sev_clean = both_scores(align_bias(img, 96, 224))
+    rise = float(np.clip((sev - sev_clean) / SEV_SPAN, 0.0, 1.0))
     ours_lbl, ours_hdr = panel(ours)
     base_lbl, base_hdr = panel(baseline)
 
-    filled = int(round(sev * 8))
+    filled = int(round(rise * 8))
     bar = "▓" * filled + "░" * (8 - filled)
-    level = "none" if sev < .2 else "light" if sev < .5 else "moderate" if sev < .8 else "heavy"
+    level = ("none" if rise < .15 else "light" if rise < .45
+             else "moderate" if rise < .75 else "heavy")
 
     note = (f"**{name}**  \n"
             f"laundering detected by the model: `{bar}` {level}")

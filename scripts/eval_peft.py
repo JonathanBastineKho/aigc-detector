@@ -30,8 +30,9 @@ REAL_ZIP = "wildfake/Images/Real/imagenet.zip"
 
 
 @torch.no_grad()
-def score(model, df, preprocess, cell, root, device, bs, workers, pre=False):
-    dl = DataLoader(CellDataset(df, preprocess, cell, root, pre), batch_size=bs,
+def score(model, df, preprocess, cell, root, device, bs, workers, pre=False,
+          align_mode="crop"):
+    dl = DataLoader(CellDataset(df, preprocess, cell, root, pre, align_mode), batch_size=bs,
                     num_workers=workers)
     ps, ys = [], []
     for x, y in tqdm(dl, desc=f"{cell:12s}", unit="batch", leave=False):
@@ -84,6 +85,10 @@ def main():
     else:
         mf, pre = data.build_manifest(root), False
 
+    # "resize" in the manifest path is how a resize-trained run is tagged.
+    align_mode = "resize" if "resize" in str(targs.get("manifest", "")) else "crop"
+    print(f"aligning held-out images with mode={align_mode}")
+
     want = data.SPLIT_HELDOUT if args.split == "heldout" else data.SPLIT_VAL
     val = mf[mf.split == want]
     if args.limit:
@@ -107,7 +112,7 @@ def main():
     rows, raw_scores, raw_y = [], {}, None
     for cell in to_score:
         p, y = score(model, val, preprocess, cell, root, device,
-                     args.batch_size, args.workers, pre)
+                     args.batch_size, args.workers, pre, align_mode)
         raw_scores[cell], raw_y = p, y
         kind = "chain" if cell in T.CHAIN_BATTERY else (
             "clean" if cell == "clean" else "single")
@@ -133,7 +138,7 @@ def main():
                                        limit=args.n_unseen)
         unseen = pd.concat([reals, fakes], ignore_index=True)
         pu, yu = score(model, unseen, preprocess, "clean", root, device,
-                       args.batch_size, args.workers)  # zip images never pre-extracted
+                       args.batch_size, args.workers, False, align_mode)
     else:
         print(f"\n  skipping unseen-generator eval: {ADM_ZIP} or {REAL_ZIP} not found")
         pu = yu = None

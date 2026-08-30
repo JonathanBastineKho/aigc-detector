@@ -29,27 +29,41 @@ from . import dataset as data, transforms as T
 DEFAULT_BACKBONE = "vit_large_patch16_dinov3.lvd1689m"
 
 
-def align_bias(img, jpeg_q: int = 96, crop: int = 224):
+def align_bias(img, jpeg_q: int = 96, size: int = 224, mode: str = "crop"):
     """Remove dataset shortcuts unrelated to generation.
 
     SID_Set leaks the label twice: geometry (100% of fakes are 1024x1024, only
     4% of reals are square -- "is it square?" alone scores 0.98 AUC) and format
     (reals JPEG ~2.9 bpp, fakes PNG ~8.5 bpp).
 
-    Follows GenImage's protocol ("Fake or JPEG?", arXiv 2403.17608): fixed crop
-    at NATIVE resolution -- never resize, which interpolates away the generator
-    fingerprints -- then one JPEG quality for both classes.
+    Follows GenImage's protocol ("Fake or JPEG?", arXiv 2403.17608): fix the
+    geometry, then recompress both classes at one quality.
 
-    Caveat for the writeup: reals end up double-compressed, fakes singly.
-    GenImage accepts this; removing it means regenerating the dataset.
+    mode="crop"    take a `size` window at NATIVE resolution. Standard in image
+                   forensics: resizing interpolates away the high-frequency
+                   artifacts CNN detectors rely on. Costs coverage -- a 224
+                   window is ~5% of a 1024px image.
+    mode="resize"  squash the whole image to size x size. Loses native pixel
+                   statistics but keeps all the content. Plausibly better for a
+                   semantic backbone like DINOv3, which reads structure rather
+                   than texture -- colour transforms cost it ~0.002 AUC while
+                   resolution loss costs 0.070.
+
+    Caveat for the writeup: reals were already JPEG, so they end up
+    double-compressed while fakes are singly compressed. GenImage accepts this.
     """
-    w, h = img.size
-    if min(w, h) < crop:                       # upscale only when unavoidable
-        r = crop / min(w, h)
-        img = img.resize((int(w * r) + 1, int(h * r) + 1), Image.BICUBIC)
+    if mode == "resize":
+        img = img.convert("RGB").resize((size, size), Image.BICUBIC)
+    elif mode == "crop":
         w, h = img.size
-    left, top = (w - crop) // 2, (h - crop) // 2
-    img = img.crop((left, top, left + crop, top + crop))
+        if min(w, h) < size:                       # upscale only when unavoidable
+            r = size / min(w, h)
+            img = img.resize((int(w * r) + 1, int(h * r) + 1), Image.BICUBIC)
+            w, h = img.size
+        left, top = (w - size) // 2, (h - size) // 2
+        img = img.crop((left, top, left + size, top + size))
+    else:
+        raise ValueError(f"unknown mode {mode!r}; use 'crop' or 'resize'")
 
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=jpeg_q)

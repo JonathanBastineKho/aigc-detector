@@ -367,11 +367,16 @@ class LaunderedPairs(Dataset):
 class CellDataset(Dataset):
     """One battery cell applied deterministically -- for evaluation, no curriculum."""
 
-    def __init__(self, df, preprocess, cell, root=None, pre_extracted=False):
+    def __init__(self, df, preprocess, cell, root=None, pre_extracted=False,
+                 align_mode="crop"):
         self.rows = df.reset_index(drop=True)
         self.preprocess = preprocess
         self.root = root or data_root()
         self.pre_extracted = pre_extracted
+        # Must match how the model was trained: evaluating a resize-trained
+        # model on cropped images is a train/test mismatch that looks like a
+        # weaker model.
+        self.align_mode = align_mode
         # A name may refer to a single battery cell or a composed chain.
         if cell in transforms.CHAIN_BATTERY:
             self.chain = transforms.CHAIN_BATTERY[cell]
@@ -387,7 +392,7 @@ class CellDataset(Dataset):
         img = load_image(row.path, self.root)
         if not self.pre_extracted:
             from .features import align_bias      # local: avoids a cycle
-            img = align_bias(img)
+            img = align_bias(img, mode=self.align_mode)
         if self.chain:
             img, _ = transforms.apply_chain(img, self.chain)
         return self.preprocess(img), torch.tensor(float(row.y))
