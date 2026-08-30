@@ -46,6 +46,13 @@ STAGES = [
                           ("resize", {"scale": 0.5}), ("jpeg", {"quality": 30})]),
 ]
 
+# Measured range of the v2 severity head across the full battery
+# (results/tables/severity_head_test.csv). It ranks laundering reliably
+# (r = 0.71) but compresses a true 0..1 range into this window, so the bar
+# shows position WITHIN that window rather than an absolute damage figure --
+# printing "0.35" for a wrecked image would be wrong.
+SEV_MIN, SEV_MAX = 0.14, 0.35
+
 M = {}
 
 
@@ -73,17 +80,21 @@ def load(checkpoint: Path, probe_path: Path | None):
 
 
 @torch.no_grad()
-def both_scores(img) -> tuple[float, float | None]:
-    """p(AI) from the adapted detector and from the frozen probe."""
+def both_scores(img) -> tuple[float, float | None, float]:
+    """p(AI) from the adapted detector, from the frozen probe, and the model's
+    own estimate of how laundered the image is."""
     x = M["preprocess"](img).unsqueeze(0).to(M["device"])
-    ours = float(torch.sigmoid(M["model"](x)["logit"])[0])
+    out = M["model"](x)
+    ours = float(torch.sigmoid(out["logit"])[0])
+    raw = float(out["s_hat"][0].float().cpu().numpy().max())
+    sev = float(np.clip((raw - SEV_MIN) / (SEV_MAX - SEV_MIN), 0.0, 1.0))
 
     baseline = None
     if M["probe"] is not None:
         with adapters_disabled(M["model"]) as m:
             h = m.backbone(x).float().cpu().numpy()
         baseline = float(M["probe"].predict_proba(h)[0, 1])
-    return ours, baseline
+    return ours, baseline, sev
 
 
 def panel(p: float | None) -> tuple[dict, str]:
@@ -107,13 +118,18 @@ def run(img, stage_idx: int):
     shown, _ = T.apply_chain(img, chain)
     scored, _ = T.apply_chain(align_bias(img, 96, 224), chain)
 
-    ours, baseline = both_scores(scored)
+    ours, baseline, sev = both_scores(scored)
     ours_lbl, ours_hdr = panel(ours)
     base_lbl, base_hdr = panel(baseline)
 
-    note = f"**{name}**"
+    filled = int(round(sev * 8))
+    bar = "▓" * filled + "░" * (8 - filled)
+    level = "none" if sev < .2 else "light" if sev < .5 else "moderate" if sev < .8 else "heavy"
+
+    note = (f"**{name}**  \n"
+            f"laundering detected by the model: `{bar}` {level}")
     if baseline is not None and (baseline > 0.5) != (ours > 0.5):
-        note += "  —  the two detectors now disagree"
+        note += "  \n\n**The two detectors now disagree.**"
     return shown, base_lbl, base_hdr, ours_lbl, ours_hdr, note
 
 
@@ -123,7 +139,9 @@ def build():
             "## Laundering an AI image past a detector\n"
             "Two real detectors on the same DINOv3 backbone. Left: a frozen "
             "linear probe. Right: parameter-efficient adaptation trained on "
-            "laundered images. Drag the slider."
+            "laundered images. Drag the slider.\n\n"
+            "*The bar below shows the model's own estimate of how laundered the "
+            "image is, inferred from the image alone — it is not told what we did.*"
         )
         with gr.Row():
             inp = gr.Image(type="pil", label="Upload an image", height=300)
@@ -154,7 +172,7 @@ def build():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=Path,
-                    default=Path("checkpoints/lora_r32_film_slim.pt"))
+                    default=Path("checkpoints/lora_r32_film_v2_slim.pt"))
     ap.add_argument("--probe", type=Path)
     ap.add_argument("--share", action="store_true")
     args = ap.parse_args()
