@@ -84,7 +84,8 @@ def main():
     targs = ck["args"]
     bb = timm.create_model(targs["backbone"], pretrained=True, num_classes=0)
     bb = apply_peft(bb, mode=targs["arm"], r=targs["rank"])
-    model = Detector(bb, dim=bb.num_features, conditioner=targs["conditioner"])
+    model = Detector(bb, dim=bb.num_features, conditioner=targs["conditioner"],
+                     bounded_severity=not targs.get("unbounded_severity", False))
     model.load_state_dict(ck["state_dict"], strict=not ck.get("slim"))
     model = model.eval().to(device)
     cfg = timm.data.resolve_model_data_config(bb)

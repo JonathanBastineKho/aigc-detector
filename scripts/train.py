@@ -78,10 +78,12 @@ def validate(model, val_df, preprocess, root, device, batch_size, workers,
     return out
 
 
-def build_model(arm: str, rank: int, conditioner: str, backbone_name: str, device: str):
+def build_model(arm: str, rank: int, conditioner: str, backbone_name: str, device: str,
+                bounded_severity: bool = True):
     backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0)
     backbone = apply_peft(backbone, mode=arm, r=rank)
-    model = Detector(backbone, dim=backbone.num_features, conditioner=conditioner)
+    model = Detector(backbone, dim=backbone.num_features, conditioner=conditioner,
+                     bounded_severity=bounded_severity)
     # Heads are always trainable regardless of how the backbone is adapted.
     for module in (model.severity, model.classifier, model.conditioner):
         for p in module.parameters():
@@ -98,6 +100,13 @@ def parse_args():
     ap.add_argument("--backbone", default=DEFAULT_BACKBONE)
     ap.add_argument("--manifest", type=Path,
                     help="pre-extracted manifest CSV (much faster than parquet)")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the run name, so a rerun does not overwrite "
+                         "existing checkpoints or result tables")
+    ap.add_argument("--unbounded-severity", action="store_true",
+                    help="drop the sigmoid on the severity head (see losses.py)")
+    ap.add_argument("--sev-weight", type=float, default=None,
+                    help="override the severity loss weight (default 0.50)")
     ap.add_argument("--holdout", nargs="+",
                     help="generators to EXCLUDE from training (leave-one-generator-out)")
     ap.add_argument("--epochs", type=int, default=5)
@@ -133,12 +142,19 @@ def main():
                     args.holdout, before, len(train_df))
     data.assert_no_heldout(train_df)
 
-    model = build_model(args.arm, args.rank, args.conditioner, args.backbone, device)
+    model = build_model(args.arm, args.rank, args.conditioner, args.backbone, device,
+                        bounded_severity=not args.unbounded_severity)
     total, trainable = count_params(model)
     logger.info("arm=%s rank=%d cond=%s device=%s", args.arm, args.rank,
                 args.conditioner, device)
     logger.info("params: %s total, %s trainable (%.2f%%)",
                 f"{total:,}", f"{trainable:,}", 100 * trainable / total)
+
+    from src.losses import C_SEV, C_SEV_STRONG
+    sev_weight = args.sev_weight if args.sev_weight is not None else (
+        C_SEV_STRONG if args.unbounded_severity else C_SEV)
+    logger.info("severity: %s output, loss weight %.2f",
+                "unbounded" if args.unbounded_severity else "sigmoid", sev_weight)
 
     cfg = timm.data.resolve_model_data_config(model.backbone)
     preprocess = timm.data.create_transform(**cfg, is_training=False)
@@ -150,6 +166,8 @@ def main():
     run_name = f"{args.arm}_r{args.rank}_{args.conditioner}"
     if args.holdout:
         run_name += "_no" + "-".join(args.holdout)
+    if args.tag:
+        run_name += f"_{args.tag}"
 
     run = None if args.no_wandb else wandb.init(
         project=args.project, name=run_name,
@@ -179,7 +197,8 @@ def main():
             x_laundered = x_laundered.to(device, non_blocking=True)
             y, severity = y.to(device), severity.to(device)
 
-            loss, parts = detection_loss(model(x_clean), model(x_laundered), y, severity)
+            loss, parts = detection_loss(model(x_clean), model(x_laundered), y,
+                                         severity, c=sev_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(

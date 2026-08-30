@@ -11,10 +11,11 @@ from ..components.heads import Conditioner, SeverityHead
 class Detector(nn.Module):
     """Backbone -> pooled features -> {severity, conditioning, detection}."""
 
-    def __init__(self, backbone: nn.Module, dim: int = 1024, conditioner: str = "film"):
+    def __init__(self, backbone: nn.Module, dim: int = 1024, conditioner: str = "film",
+                 bounded_severity: bool = True):
         super().__init__()
         self.backbone = backbone
-        self.severity = SeverityHead(dim)
+        self.severity = SeverityHead(dim, bounded=bounded_severity)
         self.conditioner = Conditioner(dim, conditioner)
         self.classifier = nn.Linear(dim, 1)
 

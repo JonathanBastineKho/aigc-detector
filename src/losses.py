@@ -17,6 +17,12 @@ import torch.nn.functional as F
 
 A_KL, B_FEAT, C_SEV = 0.50, 0.25, 0.50
 
+# Severity targets are sparse -- ~25% of samples are clean (all zeros) and the
+# rest activate 1-4 of 8 dimensions -- so predicting a small constant nearly
+# minimises SmoothL1 on its own. At C_SEV=0.50 the head took that shortcut.
+# Raising the weight makes the shortcut expensive relative to detection.
+C_SEV_STRONG = 2.00
+
 
 def symmetric_kl(logit_a: torch.Tensor, logit_b: torch.Tensor) -> torch.Tensor:
     """Agreement between the clean and laundered verdicts (DCPT / DOCL)."""

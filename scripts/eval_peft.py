@@ -44,7 +44,8 @@ def load_model(ckpt, device):
     targs = ckpt["args"]
     bb = timm.create_model(targs["backbone"], pretrained=True, num_classes=0)
     bb = apply_peft(bb, mode=targs["arm"], r=targs["rank"])
-    model = Detector(bb, dim=bb.num_features, conditioner=targs["conditioner"])
+    model = Detector(bb, dim=bb.num_features, conditioner=targs["conditioner"],
+                     bounded_severity=not targs.get("unbounded_severity", False))
     model.load_state_dict(ckpt["state_dict"])
     return model.eval().to(device)
 

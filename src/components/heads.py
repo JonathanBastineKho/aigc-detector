@@ -22,14 +22,21 @@ class SeverityHead(nn.Module):
     this head read surviving traces without being able to reshape them.
     """
 
-    def __init__(self, dim: int, hidden: int = 256):
+    def __init__(self, dim: int, hidden: int = 256, bounded: bool = True):
         super().__init__()
+        self.bounded = bounded
         self.net = nn.Sequential(
             nn.Linear(dim, hidden), nn.ReLU(), nn.Linear(hidden, N_OPS)
         )
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        return self.net(h).sigmoid()          # severities are normalised to [0,1]
+        out = self.net(h)
+        # bounded=True (the original) squashes to [0,1] with a sigmoid. That was
+        # a mistake: once the head settles near the target mean the sigmoid
+        # flattens its gradients and it cannot climb out -- ours collapsed to a
+        # constant 0.16 against a true range of 0..1. Unbounded output keeps the
+        # gradient alive; the range is clamped at inference instead.
+        return out.sigmoid() if self.bounded else out
 
 
 class Conditioner(nn.Module):
