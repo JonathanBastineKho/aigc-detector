@@ -1,5 +1,16 @@
 #!/usr/bin/env python
-"""Fit a severity estimator that actually works, separately from the model.
+"""Measure the model's own severity head, and fit a ridge as a fallback.
+
+Two questions, one script:
+
+  1. Does the severity head INSIDE the model estimate severity? (correlation
+     and output range across the battery)
+  2. If not, can a ridge on the same features do better? (the ceiling -- what is
+     extractable from this representation at all)
+
+If (1) works, the model conditions on its own estimate and the ridge is unused.
+If (1) collapses but (2) works, the failure is optimisation rather than
+representation, and the ridge drives abstention instead.
 
 The jointly-trained severity head collapsed to predicting the mean -- 0.396
 correlation across a 0.025 output range, against a true range of 0..1. The
@@ -53,11 +64,15 @@ def build(checkpoint: Path, device: str):
 
 @torch.no_grad()
 def features_for(model, df, preprocess, cell, root, device, bs, workers, pre):
-    """Pre-FiLM pooled features -- the same representation the severity head sees."""
+    """Returns (pre-FiLM features, the head's own severity estimate)."""
     dl = DataLoader(CellDataset(df, preprocess, cell, root, pre),
                     batch_size=bs, num_workers=workers)
-    return np.concatenate([model(x.to(device))["h"].float().cpu().numpy()
-                           for x, _ in dl])
+    H, S = [], []
+    for x, _ in dl:
+        out = model(x.to(device))
+        H.append(out["h"].float().cpu().numpy())
+        S.append(out["s_hat"].float().cpu().numpy())
+    return np.concatenate(H), np.concatenate(S)
 
 
 def main():
@@ -84,29 +99,47 @@ def main():
     from PIL import Image
     dummy = Image.new("RGB", (224, 224))
 
-    X, Y = [], []
+    X, Y, S = [], [], []
     for cell in T.BATTERY:
         op, kw = T.BATTERY[cell]
         _, log = T.apply_chain(dummy, [] if op == "none" else [(op, kw)])
         target = T.severity_vector(log)
-        feats = features_for(model, val, preprocess, cell, root, device,
-                             args.batch_size, args.workers, pre)
-        X.append(feats); Y.append(np.tile(target, (len(feats), 1)))
-        logger.info("  %-12s %d samples, target max %.3f", cell, len(feats), target.max())
+        feats, s_hat = features_for(model, val, preprocess, cell, root, device,
+                                    args.batch_size, args.workers, pre)
+        X.append(feats); Y.append(np.tile(target, (len(feats), 1))); S.append(s_hat)
+        logger.info("  %-12s true %.3f   head estimates %.3f",
+                    cell, target.max(), float(np.mean(s_hat.max(1))))
 
-    X, Y = np.concatenate(X), np.concatenate(Y)
+    X, Y, S = np.concatenate(X), np.concatenate(Y), np.concatenate(S)
+
+    # --- question 1: does the model's OWN head work? -----------------------
+    head_corr = float(np.corrcoef(Y.max(1), S.max(1))[0, 1])
+    head_lo, head_hi = float(S.max(1).min()), float(S.max(1).max())
+    logger.info("")
+    logger.info("BUILT-IN HEAD   correlation %.3f   range %.3f-%.3f",
+                head_corr, head_lo, head_hi)
+    if head_hi - head_lo < 0.15:
+        logger.warning("  -> collapsed: the head is predicting a near-constant")
+    else:
+        logger.info("  -> working: FiLM has a real signal to condition on")
     Xtr, Xte, Ytr, Yte = train_test_split(X, Y, test_size=0.3, random_state=0)
     ridge = Ridge(alpha=1.0).fit(Xtr, Ytr)
 
     P = ridge.predict(Xte)
     corr = float(np.corrcoef(Yte.max(1), P.max(1))[0, 1])
-    logger.info("held-out correlation %.3f   predicted range %.3f-%.3f",
+    logger.info("RIDGE FALLBACK  correlation %.3f   range %.3f-%.3f",
                 corr, P.max(1).min(), P.max(1).max())
+    logger.info("")
+    logger.info("verdict: %s", "the head works -- ridge not needed"
+                if head_corr > 0.55 and head_hi - head_lo > 0.15
+                else "the head collapsed -- abstention should use the ridge")
 
     out = root / "cache" / f"severity_{args.checkpoint.stem}.joblib"
     out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"ridge": ridge, "backbone": backbone_name,
-                 "checkpoint": args.checkpoint.name, "correlation": corr}, out)
+                 "checkpoint": args.checkpoint.name, "correlation": corr,
+                 "head_correlation": head_corr,
+                 "head_range": [head_lo, head_hi]}, out)
     logger.info("wrote %s", out)
 
 
