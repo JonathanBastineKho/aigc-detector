@@ -85,8 +85,12 @@ def main():
     else:
         mf, pre = data.build_manifest(root), False
 
-    # "resize" in the manifest path is how a resize-trained run is tagged.
-    align_mode = "resize" if "resize" in str(targs.get("manifest", "")) else "crop"
+    # Align held-out images the way this checkpoint was trained. The training
+    # manifest path records it: a resize run reads data/extracted_resize/.
+    # Evaluating a resize-trained model on cropped inputs is a train/test
+    # mismatch that reads as a weaker model.
+    align_mode = ("resize" if "resize" in str(ckpt["args"].get("manifest", ""))
+                  else "crop")
     print(f"aligning held-out images with mode={align_mode}")
 
     want = data.SPLIT_HELDOUT if args.split == "heldout" else data.SPLIT_VAL
