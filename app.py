@@ -1,19 +1,15 @@
 #!/usr/bin/env python
 """Demo: what laundering does to a detector.
 
-Two real models, no simulation. The left panel is a frozen linear probe on
-DINOv3 features -- the standard approach, and what most published baselines
-amount to. The right is the same backbone with parameter-efficient adaptation
-and laundering-augmented training.
+Upload an image and drag the slider. Each stage adds one more operation --
+reposted, cropped, thumbnailed, reposted again -- and the image is rescored
+after every one.
 
-Drag the slider and watch them diverge. We measured that 43% of AI images can be
-laundered past the probe versus 24% past the adapted model; this shows one case
-of it.
+The laundering calls the same apply_chain() the robustness table uses, so this
+is the evaluation running live rather than a mock-up of it. Nothing is
+pre-computed.
 
-The laundering here calls the same apply_chain() the robustness table uses, so
-this is the evaluation running live rather than a mock-up of it.
-
-    python app.py --checkpoint checkpoints/lora_r32_film_slim.pt
+    python app.py --checkpoint checkpoints/lora_r32_film_resize_slim.pt
 """
 
 from __future__ import annotations
@@ -23,13 +19,12 @@ import sys
 from pathlib import Path
 
 import gradio as gr
-import joblib
 import numpy as np
 import timm
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from src.components.peft import adapters_disabled, apply_peft   # noqa: E402
+from src.components.peft import apply_peft                      # noqa: E402
 from src.models.detector import Detector                        # noqa: E402
 from src.utils import transforms as T                           # noqa: E402
 from src.utils.features import align_bias, pick_device          # noqa: E402
@@ -56,9 +51,7 @@ SEV_SPAN = 0.20
 M = {}
 
 
-def load(checkpoint: Path, probe_path: Path | None):
-    """One backbone, two detectors. adapters_disabled() recovers the frozen
-    features the probe was fitted on, so the baseline costs no extra memory."""
+def load(checkpoint: Path):
     ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
     targs, device = ck["args"], pick_device()
 
@@ -69,31 +62,26 @@ def load(checkpoint: Path, probe_path: Path | None):
     model.load_state_dict(ck["state_dict"], strict=not ck.get("slim"))
 
     cfg = timm.data.resolve_model_data_config(bb)
+    # Preprocess the way this checkpoint was trained. A resize-trained model fed
+    # cropped inputs is a train/test mismatch that quietly degrades every
+    # prediction -- the training manifest path records which was used.
+    align = "resize" if "resize" in str(targs.get("manifest", "")) else "crop"
     M.update(model=model.eval().to(device), device=device,
              preprocess=timm.data.create_transform(**cfg, is_training=False),
-             arm=targs["arm"])
+             arm=targs["arm"], align=align)
 
-    probe_path = probe_path or Path("data/cache/probe.joblib")
-    M["probe"] = joblib.load(probe_path)["clf"] if probe_path.exists() else None
-    print(f"detector: {checkpoint.name} ({targs['arm']})")
-    print(f"baseline: {'frozen probe' if M['probe'] else 'NONE — left panel disabled'}")
+    print(f"detector: {checkpoint.name} ({targs['arm']}, align={align})")
 
 
 @torch.no_grad()
-def both_scores(img) -> tuple[float, float | None, float]:
-    """p(AI) from the adapted detector, from the frozen probe, and the model's
-    own estimate of how laundered the image is."""
+def score(img) -> tuple[float, float]:
+    """p(AI) and the model's own estimate of how laundered the image is."""
     x = M["preprocess"](img).unsqueeze(0).to(M["device"])
     out = M["model"](x)
     ours = float(torch.sigmoid(out["logit"])[0])
     sev = float(out["s_hat"][0].float().cpu().numpy().max())
 
-    baseline = None
-    if M["probe"] is not None:
-        with adapters_disabled(M["model"]) as m:
-            h = m.backbone(x).float().cpu().numpy()
-        baseline = float(M["probe"].predict_proba(h)[0, 1])
-    return ours, baseline, sev
+    return ours, sev
 
 
 def panel(p: float | None) -> tuple[dict, str]:
@@ -107,7 +95,7 @@ def panel(p: float | None) -> tuple[dict, str]:
 
 def run(img, stage_idx: int):
     if img is None:
-        return None, {}, "### —", {}, "### —", ""
+        return None, {}, "### —", ""
 
     name, chain = STAGES[int(stage_idx)]
 
@@ -115,37 +103,26 @@ def run(img, stage_idx: int):
     # degrading. Scoring uses the 224 crop the model was trained on -- showing
     # that crop instead made an untouched image look heavily transformed.
     shown, _ = T.apply_chain(img, chain)
-    scored, _ = T.apply_chain(align_bias(img, 96, 224), chain)
+    scored, _ = T.apply_chain(align_bias(img, 96, 224, M["align"]), chain)
 
-    ours, baseline, sev = both_scores(scored)
+    ours, sev = score(scored)
     # Baseline the estimate against this same image untouched.
-    _, _, sev_clean = both_scores(align_bias(img, 96, 224))
+    _, sev_clean = score(align_bias(img, 96, 224, M["align"]))
     rise = float(np.clip((sev - sev_clean) / SEV_SPAN, 0.0, 1.0))
-    ours_lbl, ours_hdr = panel(ours)
-    base_lbl, base_hdr = panel(baseline)
 
     filled = int(round(rise * 8))
     bar = "▓" * filled + "░" * (8 - filled)
     level = ("none" if rise < .15 else "light" if rise < .45
              else "moderate" if rise < .75 else "heavy")
 
-    note = (f"**{name}**  \n"
-            f"laundering detected by the model: `{bar}` {level}")
-    if baseline is not None and (baseline > 0.5) != (ours > 0.5):
-        note += "  \n\n**The two detectors now disagree.**"
-    return shown, base_lbl, base_hdr, ours_lbl, ours_hdr, note
+    note = f"**{name}**  \nlaundering detected: `{bar}` {level}"
+    lbl, hdr = panel(ours)
+    return shown, lbl, hdr, note
 
 
 def build():
-    with gr.Blocks(title="Laundering and AIGC detection") as demo:
-        gr.Markdown(
-            "## Laundering an AI image past a detector\n"
-            "Two real detectors on the same DINOv3 backbone. Left: a frozen "
-            "linear probe. Right: parameter-efficient adaptation trained on "
-            "laundered images. Drag the slider.\n\n"
-            "*The bar below shows the model's own estimate of how laundered the "
-            "image is, inferred from the image alone — it is not told what we did.*"
-        )
+    with gr.Blocks(title="Laundered AI detector") as demo:
+        gr.Markdown("## Laundered AI detector")
         with gr.Row():
             inp = gr.Image(type="pil", label="Upload an image", height=300)
             out_img = gr.Image(label="After laundering", height=300)
@@ -155,29 +132,19 @@ def build():
             label="Laundering   clean → reposted → cropped → thumbnailed → reposted",
         )
         note = gr.Markdown("")
+        hdr = gr.Markdown("### —")
+        out = gr.Label(num_top_classes=2, show_label=False)
 
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Frozen probe  (baseline)")
-                base_hdr = gr.Markdown("### —")
-                base_out = gr.Label(num_top_classes=2, show_label=False)
-            with gr.Column():
-                gr.Markdown("### Adapted detector  (ours)")
-                ours_hdr = gr.Markdown("### —")
-                ours_out = gr.Label(num_top_classes=2, show_label=False)
-
-        outputs = [out_img, base_out, base_hdr, ours_out, ours_hdr, note]
         for ev in (inp.change, slider.change):
-            ev(fn=run, inputs=[inp, slider], outputs=outputs)
+            ev(fn=run, inputs=[inp, slider], outputs=[out_img, out, hdr, note])
     return demo
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=Path,
-                    default=Path("checkpoints/lora_r32_film_v2_slim.pt"))
-    ap.add_argument("--probe", type=Path)
+                    default=Path("checkpoints/lora_r32_film_resize_slim.pt"))
     ap.add_argument("--share", action="store_true")
     args = ap.parse_args()
-    load(args.checkpoint, args.probe)
+    load(args.checkpoint)
     build().launch(share=args.share)

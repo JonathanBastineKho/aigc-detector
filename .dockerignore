@@ -1,14 +1,3 @@
-# data/ is ~80 GB. Without this, docker build ships the entire dataset as build
-# context and hangs before it starts. The probe is re-included because app.py
-# loads it at runtime -- it is 30 KB.
-data/**
-!data/cache/probe.joblib
-
-# The full checkpoint is 1.2 GB and redundant: the slim one plus timm's public
-# backbone reconstructs it exactly.
-checkpoints/*
-!checkpoints/lora_r32_film_slim.pt
-
 .venv/
 .git/
 mlruns/

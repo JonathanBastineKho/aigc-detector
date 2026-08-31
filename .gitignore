@@ -233,7 +233,6 @@ cache/
 *.safetensors
 
 # Model checkpoints
-checkpoints/
 runs/
 wandb/
 
@@ -244,5 +243,4 @@ mlartifacts/
 
 CLAUDE.md
 .DS_Store
-.png
-results
+results/

@@ -1,14 +1,13 @@
 #!/usr/bin/env python
-"""Deliverable: image directory -> JSON with image_path and pred per image.
+"""Required deliverable: image directory -> JSON with image_path and pred.
 
-    python predict.py --input-dir path/to/images --output preds.json
+    python scripts/predict.py --input-dir path/to/images --output predictions.json
 
 `pred` is p(AI-generated) in [0, 1].
 
-Preprocessing here must match training exactly. The probe learned on
-bias-aligned inputs -- native-resolution 224 crop, recompressed to JPEG Q=96 --
-so scoring raw images through it would silently shift the input distribution and
-degrade predictions for no visible reason.
+Preprocessing matches training exactly -- a 224 crop at native resolution,
+recompressed to JPEG quality 96. Scoring raw images would shift the input
+distribution and degrade predictions for no visible reason.
 """
 
 from __future__ import annotations
@@ -18,16 +17,19 @@ import json
 import sys
 from pathlib import Path
 
-import joblib
 import numpy as np
+import timm
 import torch
 from PIL import Image
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent))
-from src.utils import dataset as data, features as F  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from src.components.peft import apply_peft                      # noqa: E402
+from src.models.detector import Detector                        # noqa: E402
+from src.utils.features import align_bias, pick_device          # noqa: E402
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+DEFAULT_CKPT = Path("checkpoints/lora_r32_film_resize_slim.pt")
 
 
 def find_images(input_dir: Path) -> list[Path]:
@@ -35,39 +37,44 @@ def find_images(input_dir: Path) -> list[Path]:
     return sorted(p for p in input_dir.rglob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def load_model(checkpoint: Path, device: str):
+    """Slim checkpoints carry only adapters and heads; the frozen DINOv3 base is
+    rebuilt from timm, which is exact because apply_peft is deterministic."""
+    ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    targs = ck["args"]
+    bb = timm.create_model(targs["backbone"], pretrained=True, num_classes=0)
+    bb = apply_peft(bb, mode=targs["arm"], r=targs["rank"])
+    model = Detector(bb, dim=bb.num_features, conditioner=targs["conditioner"],
+                     bounded_severity=not targs.get("unbounded_severity", False))
+    model.load_state_dict(ck["state_dict"], strict=not ck.get("slim"))
+    cfg = timm.data.resolve_model_data_config(bb)
+    align = "resize" if "resize" in str(targs.get("manifest", "")) else "crop"
+    return (model.eval().to(device),
+            timm.data.create_transform(**cfg, is_training=False), align)
+
+
 @torch.no_grad()
-def predict(
-    paths: list[Path],
-    clf,
-    model,
-    preprocess,
-    device: str,
-    batch_size: int = 16,
-    jpeg_q: int = 96,
-    crop: int = 224,
-) -> list[float]:
-    """Score every path. Unreadable files get 0.5 rather than crashing the run --
-    a submission script that dies on one corrupt file is worse than one that
-    flags it as undecided."""
+def predict(paths, model, preprocess, align, device, batch_size=16):
+    """Unreadable files score 0.5 rather than killing the run -- a submission
+    script that dies on one corrupt file is worse than one that flags it."""
     preds: list[float] = []
     batch: list[torch.Tensor] = []
 
     def flush():
-        if not batch:
-            return
-        feats = model(torch.stack(batch).to(device)).float().cpu().numpy()
-        preds.extend(clf.predict_proba(feats)[:, 1].tolist())
-        batch.clear()
+        if batch:
+            logits = model(torch.stack(batch).to(device))["logit"]
+            preds.extend(torch.sigmoid(logits).float().cpu().numpy().tolist())
+            batch.clear()
 
     for p in tqdm(paths, desc="scoring", unit="img"):
         try:
-            img = Image.open(p).convert("RGB")
+            img = align_bias(Image.open(p).convert("RGB"), mode=align)
         except Exception as exc:  # noqa: BLE001
             print(f"  unreadable, scoring 0.5: {p} ({exc})", file=sys.stderr)
             flush()
             preds.append(0.5)
             continue
-        batch.append(preprocess(F.align_bias(img, jpeg_q, crop)))
+        batch.append(preprocess(img))
         if len(batch) == batch_size:
             flush()
     flush()
@@ -75,11 +82,10 @@ def predict(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Score a directory of images for AIGC likelihood")
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input-dir", required=True, type=Path)
     ap.add_argument("--output", default="predictions.json", type=Path)
-    ap.add_argument("--model", type=Path, default=None,
-                    help="fitted probe (default: $AIGCD_DATA_ROOT/cache/probe.joblib)")
+    ap.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--device", default=None)
     ap.add_argument("--relative", action="store_true",
@@ -88,27 +94,23 @@ def main() -> None:
 
     if not args.input_dir.is_dir():
         raise SystemExit(f"not a directory: {args.input_dir}")
-
-    model_path = args.model or (data.data_root() / "cache" / "probe.joblib")
-    if not model_path.exists():
-        raise SystemExit(f"no fitted probe at {model_path}. Run: python -m src.utils.probe")
+    if not args.checkpoint.exists():
+        raise SystemExit(f"no checkpoint at {args.checkpoint}")
 
     paths = find_images(args.input_dir)
     if not paths:
         raise SystemExit(f"no images found under {args.input_dir}")
 
-    bundle = joblib.load(model_path)
-    device = args.device or F.pick_device()
-    backbone, preprocess = F.load_backbone(bundle["backbone"], device)
+    device = args.device or pick_device()
+    model, preprocess, align = load_model(args.checkpoint, device)
+    print(f"{len(paths)} images  |  {args.checkpoint.name}  |  {device}  |  align={align}")
 
-    print(f"{len(paths)} images  |  device={device}  |  backbone={bundle['backbone']}")
-    preds = predict(paths, bundle["clf"], backbone, preprocess, device, args.batch_size)
+    preds = predict(paths, model, preprocess, align, device, args.batch_size)
 
     records = [
-        {
-            "image_path": str(p.relative_to(args.input_dir) if args.relative else p.resolve()),
-            "pred": round(float(s), 6),
-        }
+        {"image_path": str(p.relative_to(args.input_dir) if args.relative
+                           else p.resolve()),
+         "pred": round(float(s), 6)}
         for p, s in zip(paths, preds)
     ]
     args.output.parent.mkdir(parents=True, exist_ok=True)

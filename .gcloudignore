@@ -1,0 +1,19 @@
+.gcloudignore
+.git/
+.venv/
+mlruns/
+wandb/
+results/
+notebooks/
+tests/
+__pycache__/
+*.pyc
+
+# Ignore all data except the probe
+data/*
+!data/cache/
+!data/cache/probe.joblib
+
+# Ignore all checkpoints except the slim model
+checkpoints/*
+!checkpoints/lora_r32_film_resize_slim.pt

@@ -13,7 +13,7 @@ RUN uv sync --frozen --no-dev
 
 COPY src/ src/
 COPY app.py .
-COPY checkpoints/lora_r32_film_slim.pt checkpoints/
+COPY checkpoints/lora_r32_film_resize_slim.pt checkpoints/
 COPY data/cache/probe.joblib data/cache/
 
 # Bake DINOv3 into the image. Without this every cold start pulls 1.2 GB from
@@ -24,4 +24,4 @@ RUN uv run python -c "import timm; timm.create_model('vit_large_patch16_dinov3.l
 # Cloud Run sends traffic to $PORT; Gradio must bind 0.0.0.0 to receive it.
 ENV GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SERVER_PORT=8080
 EXPOSE 8080
-CMD ["uv", "run", "python", "app.py", "--checkpoint", "checkpoints/lora_r32_film_slim.pt"]
+CMD ["uv", "run", "python", "app.py", "--checkpoint", "checkpoints/lora_r32_film_resize_slim.pt"]
